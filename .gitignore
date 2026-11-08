@@ -13,3 +13,8 @@ npm-debug.log*
 # OS files
 .DS_Store
 Thumbs.db
+
+# Runtime local store state — preserve locally, never commit runtime payment/idempotency state
+src/data/paypal_store.json
+*.store.json
+paypal_store.json

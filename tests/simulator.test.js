@@ -27,7 +27,7 @@
 const { simulateSettlementDataset } = require('../src/data/simulator');
 const { reconcile }                 = require('../src/engine/reconcile');
 const store                         = require('../src/store/dataStore');
-const { normalizePayment, normalizeRefund, normalizeOrder } = require('../src/razorpay/adapter');
+const { normalizePayment, normalizeRefund, normalizeOrder } = require('../src/payments/adapter');
 
 // ── Mock data fixtures ────────────────────────────────────────────────────────
 

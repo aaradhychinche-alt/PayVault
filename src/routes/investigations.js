@@ -477,12 +477,13 @@ router.post('/:id/chat', async (req, res) => {
       console.warn('[Redis] Transient get warning:', e.message);
     }
 
-    // ── Execute Payvault AI Reasoning ──────────────────────────────────────
+    // ── Execute Payvault AI Reasoning (with Ollama support) ───────────────
     const chatResult = await routeAndAnswerChat({
       message: message.trim(),
       ctx,
       history,
       conversationState: redisState,
+      forceOllama: req.body?.use_ollama === true || req.query?.use_ollama === 'true',
     });
 
     // ── Save updated conversation state to Redis ───────────────────────────
@@ -504,15 +505,24 @@ router.post('/:id/chat', async (req, res) => {
     }
 
     return res.json({
-      answer:          chatResult.answer,
-      source:          chatResult.source,
-      case_id:         id,
-      conversation_id: conversationId,
-      ai_used:         chatResult.execution_mode === 'HYBRID_ASSISTED',
-      model:           'Payvault AI',
-      execution_mode:  chatResult.execution_mode,
-      intent:          chatResult.intent,
-      confidence:      chatResult.confidence,
+      answer:                      chatResult.answer, // Deterministically composed factual answer
+      source:                      chatResult.source,
+      case_id:                     id,
+      conversation_id:             conversationId,
+      ai_used:                     chatResult.execution_mode === 'LOCAL_OLLAMA_ASSISTED' || chatResult.ai_used === true,
+      model:                       chatResult.model || 'Payvault AI',
+      model_used:                  chatResult.model_used || chatResult.model || 'Payvault AI',
+      answer_composed_by:          chatResult.answer_composed_by || 'payvault_deterministic_engine',
+      execution_mode:              chatResult.execution_mode,
+      intent:                      chatResult.intent,
+      confidence:                  chatResult.confidence,
+      model_confidence:            chatResult.model_confidence || null,
+      grounding_verified:          chatResult.grounding_verified || false,
+      raw_model_response:          chatResult.raw_model_response || null,
+      unverified_model_commentary: chatResult.unverified_model_commentary || null,
+      cited_evidence:              chatResult.cited_evidence || [],
+      fallback_used:               chatResult.fallback_used || false,
+      fallback_reason:             chatResult.fallback_reason || null,
     });
 
   } catch (err) {

@@ -2358,7 +2358,7 @@ body {
 /* Processing Mode Toggle Cards */
 .processing-mode-toggle {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
   gap: 0.85rem;
   margin-bottom: 0.5rem;
 }

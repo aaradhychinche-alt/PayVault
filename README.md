@@ -12,8 +12,8 @@ Get Payvault up and running in under two minutes with Docker:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/aaradhychinche/RazorPay.git
-cd RazorPay
+git clone https://github.com/aaradhychinche/PayVault.git
+cd PayVault
 
 # 2. Copy the environment template
 cp .env.example .env
@@ -26,7 +26,7 @@ Once the containers are healthy, open **[http://localhost:3000](http://localhost
 
 - **PostgreSQL migrations execute automatically** on startup.
 - **Redis connection initializes automatically** for conversational session caching.
-- **Payvault starts in Test Mode** (ready for instant synthetic reconciliation or Razorpay live test mode).
+- **Payvault starts in PayPal Sandbox Demo Mode** (ready for instant synthetic reconciliation or real PayPal Orders v2 sandbox checkout).
 
 ---
 
@@ -70,7 +70,7 @@ Payvault separates concerns strictly across permanent persistence, transient sta
 ### 1. Deterministic Reconciliation Engine
 Matches gateway payments, settlement batches, and merchant ledger entries with mathematical certainty:
 - **Integer-Paise Precision**: All calculations occur in integer paise (100 paise = ₹1.00) to eliminate IEEE 754 floating-point errors.
-- **Multi-Source Ingestion**: Ingests Razorpay payment captures, settlement UTRs, and internal order records.
+- **Multi-Source Ingestion**: Ingests PayPal Sandbox captures, settlement records, and merchant order ledgers.
 - **9 Exception Categories Detected**:
   - `CLEAN_MATCH`: Gross, fee, tax, and net credit match expected schedules.
   - `FEE_TAX_VARIANCE`: Gateway platform fee or GST deviates from contracted rate (2.0% + 18% GST).
@@ -93,11 +93,21 @@ Matches gateway payments, settlement batches, and merchant ledger entries with m
 - **Lifecycle Timeline**: Chronological event sequence from order creation to bank UTR settlement credit.
 - **Human-Controlled Resolution**: Transition cases between `OPEN`, `IN_REVIEW`, and `RESOLVED` with mandatory business justification codes and operator audit notes. The AI engine is strictly prohibited from mutating case status.
 
-### 3. Conversational Payvault AI Copilot
-Ask Payvault AI directly questions about the active investigation case:
-- **Multi-turn Context Retention**: Context flows across questions (e.g., *"Why is the settlement lower?"* → *"What about GST?"* → *"Where did the missing amount go?"*).
-- **Case Isolation**: Conversations on Case A never leak context into Case B.
-- **100% Native Reasoning**: Grounded entirely in deterministic case data from PostgreSQL and classified by local ML. **No external LLMs (OpenAI, Claude, Qwen, Ollama) are used or required.**
+### 3. Conversational Payvault AI Copilot (Ollama & Deterministic Tools)
+Ask Payvault AI questions about the active investigation case:
+- **Local Ollama Integration**: Powered by local `qwen2.5:1.5b` running on `http://127.0.0.1:11434`.
+- **Authoritative Deterministic Tool Calling**: Ollama invokes deterministic tools (`get_case_financials`, `calculate_variance`, `get_cited_evidence`) to retrieve authoritative numbers before formulating commentary.
+- **Strict Grounding Guarantee**: The displayed factual answer is owned exclusively by the deterministic evidence composer using penny-perfect integer arithmetic. Raw model prose is isolated and clearly labeled as `[UNVERIFIED LOCAL MODEL COMMENTARY]`, never presented with false factual confidence.
+- **Graceful Fallback**: Automatically falls back to Payvault Native Reasoning if Ollama is disabled or offline.
+- **Case Isolation**: Evidence facts from Case A are strictly isolated and never bleed into Case B.
+
+### 4. PayPal Sandbox Orders v2 & Dispute Reconciliation
+Full local integration with PayPal Sandbox:
+- **Server-Controlled Pricing & Anti-Tampering**: Pricing catalog is strictly owned by the server. Any client-side tampering of amounts, currencies, or reference IDs is rejected with HTTP 422.
+- **Durable Pre-Network Idempotency**: Order creation and capture requests register idempotency keys to disk *before* any outbound network calls. If disk persistence fails, the request fails closed with HTTP 500 without making network calls.
+- **Capture Reconciliation**: Captures are automatically reconciled against registered orders, generating formal `ReconciliationResult` records and exceptions on variances.
+- **Webhook Verification & Replay Protection**: Ingests PayPal webhooks using raw payload buffer verification against `/v1/notifications/verify-webhook-signature`, with strict deduplication and out-of-order event preservation.
+- **Dispute & Chargeback Investigation**: Processes `CUSTOMER.DISPUTE.*` webhooks, creates high-priority `DISPUTE_REVERSAL` exceptions in the investigation queue, and surfaces dispute alert banners in the dashboard.
 
 ---
 
@@ -134,13 +144,14 @@ cp .env.example .env
 | `DATABASE_URL` | `postgresql://payvault:payvault_dev_secret@localhost:5432/payvault` | PostgreSQL connection string. (Inside Docker, host is `postgres`). |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection string. (Inside Docker, host is `redis`). |
 | `CHAT_CONTEXT_TTL_SECONDS` | `3600` | Expiration time (seconds) for conversational session context in Redis. |
-| `RAZORPAY_KEY_ID` | `rzp_test_TWcM6wNXkUaBlu` | Razorpay Test API Key ID. |
-| `RAZORPAY_KEY_SECRET` | *(secret placeholder)* | Razorpay Test API Key Secret. |
+| `PAYPAL_CLIENT_ID` | *(your sandbox client id)* | PayPal Developer Sandbox App Client ID. |
+| `PAYPAL_CLIENT_SECRET` | *(secret placeholder)* | PayPal Developer Sandbox App Client Secret. |
+| `PAYPAL_WEBHOOK_ID` | *(optional webhook id)* | PayPal Sandbox Webhook ID for signature verification. |
 | `POSTGRES_DB` | `payvault` | PostgreSQL database name (used by Docker Compose). |
 | `POSTGRES_USER` | `payvault` | PostgreSQL user (used by Docker Compose). |
 | `POSTGRES_PASSWORD` | `payvault_dev_secret` | PostgreSQL development password. |
 
-> **Note on Security**: Never commit your actual `RAZORPAY_KEY_SECRET` or production database credentials to version control. The repository ignores `.env` by default.
+> **Note on Security**: Never commit your actual `PAYPAL_CLIENT_SECRET` or production database credentials to version control. The repository ignores `.env` by default.
 
 ---
 
@@ -308,9 +319,10 @@ Payvault exposes dedicated health verification endpoints:
     "status": "connected",
     "mode": "REDIS_PERSISTENT"
   },
-  "razorpay": {
+  "paypal": {
     "configured": true,
-    "mode": "test"
+    "environment": "sandbox",
+    "auth_token_cached": false
   }
 }
 ```
@@ -319,15 +331,15 @@ Payvault exposes dedicated health verification endpoints:
 
 ---
 
-## Razorpay Test Mode vs Synthetic Simulation
+## PayPal Sandbox Orders v2 vs Synthetic Simulation
 
-Payvault supports two testing modes for payment ingestion:
+Payvault supports dual modes for payment operations:
 
-1. **Razorpay Test Mode**:
-   - Uses real Razorpay Test credentials (`RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET`).
-   - Launches the real Razorpay standard web checkout modal.
-   - Client verifies cryptographic HMAC-SHA256 signatures upon payment completion.
-   - Captures real payment IDs (e.g., `pay_...`).
+1. **PayPal Sandbox Mode**:
+   - Uses real PayPal Sandbox credentials (`PAYPAL_CLIENT_ID` / `PAYPAL_CLIENT_SECRET`).
+   - Server creates Orders v2 with server-controlled pricing in integer minor units.
+   - Returns buyer approval links and server-verified capture evidence.
+   - Enforces strict architectural separation: `is_gateway_capture: true, is_bank_settlement: false`.
 2. **Settlement Simulator & Synthetic Benchmark**:
    - Payment gateway sandboxes do not execute actual bank settlement batches (UTRs).
    - Payvault's settlement simulator creates deterministic settlement batches and injects realistic real-world discrepancies (timing gaps, fee miscalculations, GST variances) so you can test reconciliation and exception investigations end-to-end.
@@ -425,7 +437,8 @@ node scripts/evaluate.js
 │   │   ├── investigations.js       # Case details, run action, resolve, chat
 │   │   ├── reconciliation.js       # Reconciliation results & summary metrics
 │   │   ├── exceptions.js           # Exception queries
-│   │   └── demo.js                 # Demo data resets & Razorpay sync
+│   │   ├── demo.js                 # Demo data resets & benchmark loaders
+│   │   └── paypal.js               # PayPal Sandbox Orders v2 & webhook receiver
 │   │
 │   └── store/
 │       └── dataStore.js            # Application data store & state synchronization
@@ -437,6 +450,91 @@ node scripts/evaluate.js
     ├── engine.test.js                  # Reconciliation mathematical rules
     └── test_ml.py                      # Python ML intent model validation
 ```
+
+---
+
+## Local Standalone Setup (Without Docker)
+
+Payvault can run standalone on localhost with SQLite / file persistence and local Ollama:
+
+```bash
+# 1. Install Node.js dependencies
+npm install
+
+# 2. Configure environment variables in .env (git-ignored)
+cp .env.example .env
+
+# 3. Start local Ollama (optional, for local AI investigation copilot)
+ollama serve
+ollama pull qwen2.5:1.5b
+
+# 4. Start the Payvault server
+npm start
+# Server listens on http://127.0.0.1:3000
+```
+
+### Required & Optional Environment Variables
+
+| Variable | Required? | Default | Purpose |
+| :--- | :--- | :--- | :--- |
+| `PAYPAL_CLIENT_ID` | Yes (for live sandbox) | - | PayPal Developer Sandbox OAuth 2.0 Client ID |
+| `PAYPAL_CLIENT_SECRET` | Yes (for live sandbox) | - | PayPal Developer Sandbox OAuth 2.0 Client Secret |
+| `PAYPAL_ENVIRONMENT` | Yes | `sandbox` | PayPal API environment (`sandbox` or `production`) |
+| `PAYPAL_WEBHOOK_ID` | Optional | - | Webhook ID from PayPal Developer Dashboard for signature checks |
+| `PORT` | Optional | `3000` | HTTP port for Payvault express server (bound to 127.0.0.1) |
+| `OLLAMA_BASE_URL` | Optional | `http://127.0.0.1:11434` | Endpoint for local Ollama HTTP API |
+| `OLLAMA_MODEL` | Optional | `qwen2.5:1.5b` | Ollama model name for investigation chat |
+| `OLLAMA_TIMEOUT_MS` | Optional | `12000` | Maximum timeout before fallback to native reasoning |
+
+---
+
+## Test Execution Commands
+
+Payvault includes a comprehensive Jest verification suite covering all layers:
+
+```bash
+# Run the entire test suite
+npm test
+
+# Run PayPal Sandbox integration suite (33 tests)
+npx jest tests/paypal.test.js
+
+# Run Local Ollama AI & Tool-Calling suite (13 tests)
+npx jest tests/ollama.test.js
+
+# Run Investigation Workstation & ML suite (37 tests)
+npx jest tests/investigation.test.js
+
+# Run Safe Minor-Units Money Arithmetic suite (16 tests)
+npx jest tests/money.test.js
+
+# Run Process Restart & Durable Persistence suite
+npx jest tests/restartPersistence.test.js
+```
+
+---
+
+## Honest List of Limitations
+
+Payvault maintains strict architectural honesty regarding what is locally verified versus what requires external infrastructure or manual intervention:
+
+1. **Buyer Approval Requires External Human Interaction**:
+   - Creating a PayPal sandbox order returns a valid approval link (`https://www.sandbox.paypal.com/checkoutnow?token=...`).
+   - Capturing an order requires a human operator to log into that URL with Sandbox Personal Buyer credentials and approve the payment.
+   - Calling `/api/paypal/capture-order` *before* buyer approval will be rejected by PayPal's sandbox API with `ORDER_NOT_APPROVED`. This is by design in PayPal's two-step authorization architecture.
+
+2. **Gateway Capture is NOT Bank Settlement**:
+   - PayPal captures confirm payment authorization and funds receipt into the merchant's PayPal digital balance.
+   - Bank settlement (nodal settlement UTR) represents the actual bank wire transfer from the aggregator/gateway nodal account into the merchant's bank account, which operates on T+2 multi-batch payout cycles.
+   - Payvault strictly prevents labeling gateway captures as bank settlements in both database records and user interfaces.
+
+3. **Inbound Webhook Delivery Requires Public Endpoints**:
+   - PayPal Sandbox servers cannot deliver webhooks directly to a private loopback address (`127.0.0.1:3000`) without a secure public tunnel (e.g. ngrok/Cloudflare tunnel) or static webhook proxy.
+   - Local webhook testing is conducted using simulated webhook signatures, raw-body verification tests, and official PayPal `/v1/notifications/verify-webhook-signature` API mocks.
+
+4. **Small Local LLM Hallucination Boundaries**:
+   - Small quantized local models (such as `qwen2.5:1.5b`) can hallucinate numbers, confuse shortfalls with payouts, or produce ungrounded financial claims in free prose.
+   - Payvault solves this by delegating the displayed factual answer exclusively to the deterministic native evidence composer using integer paise arithmetic. Ollama runs tool-calling for natural commentary, but free prose is isolated as `[UNVERIFIED LOCAL MODEL COMMENTARY]`.
 
 ---
 

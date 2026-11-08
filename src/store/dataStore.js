@@ -15,6 +15,8 @@
  *   EVALUATION ONLY:        _groundTruth (never sent to public AI layer)
  */
 
+const fs = require('fs');
+const path = require('path');
 const { generateDataset, calcFee }  = require('../data/generator');
 const { simulateSettlementDataset } = require('../data/simulator');
 const { reconcile }                 = require('../engine/reconcile');
@@ -27,7 +29,77 @@ const {
   createAuditEvent,
   isValidResolutionReason,
 } = require('../models/resolution');
-const razorpayAdapter               = require('../razorpay/adapter');
+const genericPaymentAdapter         = require('../payments/adapter');
+
+function getPayPalStoreFile() {
+  return process.env.PAYPAL_STORE_PATH || path.join(__dirname, '../data/paypal_store.json');
+}
+
+const IN_FLIGHT_TIMEOUT_MS = parseInt(process.env.IDEMPOTENCY_TIMEOUT_MS, 10) || 60000; // 60s timeout
+
+function _loadPayPalDiskState() {
+  const storeFile = getPayPalStoreFile();
+  try {
+    if (fs.existsSync(storeFile)) {
+      const raw = fs.readFileSync(storeFile, 'utf8');
+      const data = JSON.parse(raw);
+      return {
+        orders: Array.isArray(data.orders) ? data.orders : [],
+        captures: Array.isArray(data.captures) ? data.captures : [],
+        idempotency: Array.isArray(data.idempotency) ? data.idempotency : [],
+        webhook_events: Array.isArray(data.webhook_events) ? data.webhook_events : [],
+        resource_states: Array.isArray(data.resource_states) ? data.resource_states : [],
+      };
+    }
+  } catch (err) {
+    // Non-fatal
+  }
+  return { orders: [], captures: [], idempotency: [], webhook_events: [], resource_states: [] };
+}
+
+function _savePayPalDiskState(throwOnError = false) {
+  if (!_store) return;
+  const storeFile = getPayPalStoreFile();
+  const dir = path.dirname(storeFile);
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const ordersArray = Array.from((_store.paypalOrders || new Map()).values());
+    const capturesArray = _store.paypalCaptures || [];
+    const idempotencyArray = Array.from((_store.paypalIdempotency || new Map()).entries());
+    const webhookEventsArray = Array.from((_store.paypalWebhookEvents || new Map()).entries());
+    const resourceStatesArray = Array.from((_store.paypalResourceStates || new Map()).entries());
+
+    const payload = {
+      orders: ordersArray,
+      captures: capturesArray,
+      idempotency: idempotencyArray,
+      webhook_events: webhookEventsArray,
+      resource_states: resourceStatesArray,
+      updated_at: new Date().toISOString(),
+    };
+    const tmpFile = `${storeFile}.tmp.${process.pid}.${Date.now()}`;
+    fs.writeFileSync(tmpFile, JSON.stringify(payload, null, 2), 'utf8');
+    fs.renameSync(tmpFile, storeFile);
+  } catch (err) {
+    console.error('[dataStore] Failed to save PayPal store to disk:', err.message);
+    if (throwOnError) {
+      throw err;
+    }
+  }
+}
+
+function _clearPayPalDiskState() {
+  const storeFile = getPayPalStoreFile();
+  try {
+    if (fs.existsSync(storeFile)) {
+      fs.unlinkSync(storeFile);
+    }
+  } catch (err) {
+    // Non-fatal
+  }
+}
 
 let _store = null;
 
@@ -35,7 +107,50 @@ let _store = null;
  * Initialize an empty live store.
  * Used on server startup and clean session resets so the UI starts with 0 random records.
  */
-function initEmpty(mode = 'LIVE') {
+function initEmpty(mode = 'LIVE', options = {}) {
+  const shouldLoadDisk = options.loadDisk === true || (process.env.NODE_ENV !== 'test' && options.loadDisk !== false);
+  const disk = shouldLoadDisk ? _loadPayPalDiskState() : { orders: [], captures: [], idempotency: [], webhook_events: [], resource_states: [] };
+
+  const paypalOrders = new Map();
+  for (const ord of disk.orders) {
+    if (ord && ord.order_id) {
+      paypalOrders.set(ord.order_id, ord);
+    }
+  }
+
+  const paypalIdempotency = new Map();
+  for (const item of disk.idempotency) {
+    let key, val;
+    if (Array.isArray(item)) {
+      [key, val] = item;
+    } else if (item && item.key) {
+      key = item.key;
+      val = item;
+    }
+    if (key && val) {
+      // RESTART AUDIT RECOVERY: Any in-flight lock saved prior to process exit was interrupted
+      if (val.status === 'IN_FLIGHT') {
+        val.status = 'INTERRUPTED_RETRYABLE';
+        val.recovered_on_restart = true;
+      }
+      paypalIdempotency.set(key, val);
+    }
+  }
+
+  const paypalWebhookEvents = new Map();
+  for (const item of (disk.webhook_events || [])) {
+    if (Array.isArray(item) && item[0]) {
+      paypalWebhookEvents.set(item[0], item[1]);
+    }
+  }
+
+  const paypalResourceStates = new Map();
+  for (const item of (disk.resource_states || [])) {
+    if (Array.isArray(item) && item[0]) {
+      paypalResourceStates.set(item[0], item[1]);
+    }
+  }
+
   _store = {
     mode,
     data_source:           'razorpay_test_mode',
@@ -48,6 +163,11 @@ function initEmpty(mode = 'LIVE') {
     reconciliationResults: [],
     exceptions:            [],
     payments:              [],
+    paypalOrders,
+    paypalCaptures:        disk.captures,
+    paypalIdempotency,
+    paypalWebhookEvents,
+    paypalResourceStates,
     caseStatus:            new Map(),
     aiInvestigations:      new Map(),
     auditTrail:            [],
@@ -70,6 +190,10 @@ function reset() {
   const dataset = generateDataset();
   const { results, exceptions } = reconcile(dataset);
 
+  const preservedOrders = _store?.paypalOrders || new Map();
+  const preservedCaptures = _store?.paypalCaptures || [];
+  const preservedIdem = _store?.paypalIdempotency || new Map();
+
   _store = {
     mode:                  'SYNTHETIC',
     data_source:           'synthetic',
@@ -82,6 +206,9 @@ function reset() {
     reconciliationResults: results,
     exceptions,
     payments:              dataset.settlementRecords.filter(r => r.type === 'payment'),
+    paypalOrders:          preservedOrders,
+    paypalCaptures:        preservedCaptures,
+    paypalIdempotency:     preservedIdem,
     caseStatus:            new Map(),
     aiInvestigations:      new Map(),
     auditTrail:            [],
@@ -105,6 +232,9 @@ function getStore() {
   if (!_store.caseStatus) _store.caseStatus = new Map();
   if (!_store.aiInvestigations) _store.aiInvestigations = new Map();
   if (!_store.auditTrail) _store.auditTrail = [];
+  if (!_store.paypalOrders) _store.paypalOrders = new Map();
+  if (!_store.paypalCaptures) _store.paypalCaptures = [];
+  if (!_store.paypalIdempotency) _store.paypalIdempotency = new Map();
   return _store;
 }
 
@@ -364,7 +494,7 @@ function addPaymentTransaction(paymentData = {}) {
  * Sync from real Razorpay Test Mode idempotently (Mode B).
  */
 async function syncRazorpay(adapter = null, options = {}) {
-  const adp = adapter || razorpayAdapter;
+  const adp = adapter || genericPaymentAdapter;
   const { orders, payments, refunds } = await adp.fetchAllTransactions();
 
   const store = getStore();
@@ -789,12 +919,346 @@ function getSummary() {
   };
 }
 
+// ── PayPal Sandbox Integration Storage ───────────────────────────────────────
+function addPayPalOrder(order) {
+  const s = getStore();
+  if (!order || !order.order_id) {
+    throw new Error('addPayPalOrder requires an order object with order_id.');
+  }
+  s.paypalOrders.set(order.order_id, {
+    ...order,
+    status: order.status || 'CREATED',
+    registered_at: order.registered_at || Date.now(),
+  });
+  _savePayPalDiskState();
+  return s.paypalOrders.get(order.order_id);
+}
+
+function getPayPalOrder(orderId) {
+  const s = getStore();
+  return s.paypalOrders.get(orderId) || null;
+}
+
+function getPayPalOrders() {
+  const s = getStore();
+  return Array.from(s.paypalOrders.values());
+}
+
+function addPayPalCapture(capture) {
+  const s = getStore();
+  if (!capture || !capture.capture_id) {
+    throw new Error('addPayPalCapture requires a capture object with capture_id.');
+  }
+
+  // Update order status if order_id is present
+  if (capture.order_id && s.paypalOrders.has(capture.order_id)) {
+    const ord = s.paypalOrders.get(capture.order_id);
+    ord.status = 'COMPLETED';
+    ord.capture_id = capture.capture_id;
+    ord.captured_at = Date.now();
+  }
+
+  // Idempotency: avoid duplicate captures
+  const existing = s.paypalCaptures.find(c => c.capture_id === capture.capture_id);
+  if (existing) {
+    _savePayPalDiskState();
+    return existing;
+  }
+
+  const record = {
+    ...capture,
+    gateway: 'PAYPAL_SANDBOX',
+    is_gateway_capture: true,
+    is_bank_settlement: false, // strictly maintain distinction
+    captured_at: capture.create_time || new Date().toISOString(),
+    ingested_at: Date.now(),
+  };
+
+  s.paypalCaptures.unshift(record);
+
+  // Append audit event for traceability
+  s.auditTrail.push({
+    event_id: `audit_pp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    event_type: 'PAYPAL_CAPTURE_RECORDED',
+    entity_id: capture.capture_id,
+    order_id: capture.order_id,
+    details: {
+      amount_minor: capture.amount_minor,
+      currency: capture.currency,
+      status: capture.capture_status,
+      idempotency_key: capture.idempotency_key,
+    },
+    created_at: new Date().toISOString(),
+  });
+
+  _savePayPalDiskState();
+  return record;
+}
+
+function reconcilePayPalCapture(capture) {
+  const s = getStore();
+  if (!capture || !capture.capture_id) return null;
+
+  const ord = capture.order_id ? s.paypalOrders.get(capture.order_id) : null;
+  const isMatch = !!(ord && ord.amount_minor === capture.amount_minor && ord.currency === capture.currency);
+
+  let excId = null;
+  if (!isMatch) {
+    excId = `exc_pp_${capture.capture_id.slice(-6)}`;
+    const existingExc = s.exceptions.find(e => e.id === excId);
+    if (!existingExc) {
+      s.exceptions.unshift({
+        id: excId,
+        case_id: excId,
+        category: ord ? 'FEE_TAX_VARIANCE' : 'MISSING_ORDER',
+        amount_at_risk: ord ? Math.abs(ord.amount_minor - capture.amount_minor) : capture.amount_minor,
+        currency: capture.currency,
+        status: 'OPEN',
+        priority: 'HIGH',
+        reconciliation_result_id: `recon_pp_${capture.capture_id}`,
+        order_id: capture.order_id,
+        description: ord
+          ? `PayPal capture amount variance for order ${capture.order_id} (Expected: ${ord.amount_minor}, Captured: ${capture.amount_minor})`
+          : `PayPal capture with missing registered order ${capture.order_id}`,
+        created_at: Math.floor(Date.now() / 1000),
+        source: 'PAYPAL_SANDBOX_RECON',
+      });
+    }
+  }
+
+  const reconResult = {
+    id: `recon_pp_${capture.capture_id}`,
+    settlement_entity_id: capture.capture_id,
+    merchant_order_id: capture.order_id,
+    amount_paise: capture.amount_minor,
+    currency: capture.currency,
+    gateway: 'PAYPAL_SANDBOX',
+    status: isMatch ? 'MATCHED' : 'EXCEPTION',
+    exception_id: excId,
+    created_at: Math.floor(Date.now() / 1000),
+  };
+
+  const existingIdx = s.reconciliationResults.findIndex(r => r.id === reconResult.id);
+  if (existingIdx >= 0) {
+    s.reconciliationResults[existingIdx] = reconResult;
+  } else {
+    s.reconciliationResults.unshift(reconResult);
+  }
+
+  s.auditTrail.push({
+    event_id: `audit_recon_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    case_id: excId,
+    action: 'PAYPAL_RECONCILED',
+    event_type: 'PAYPAL_RECONCILIATION_COMPLETED',
+    entity_id: capture.capture_id,
+    order_id: capture.order_id,
+    details: {
+      status: reconResult.status,
+      amount_minor: capture.amount_minor,
+      currency: capture.currency,
+      is_gateway_capture: true,
+    },
+    performed_by: 'Payvault Deterministic Recon Engine',
+    created_at: Date.now(),
+  });
+
+  _savePayPalDiskState();
+  return reconResult;
+}
+
+function recordDisputeAudit(disputeData = {}) {
+  const s = getStore();
+  const eventId = disputeData.event_id || `evt_${Date.now()}`;
+  const excId = `exc_disp_${eventId.slice(-8)}`;
+
+  s.auditTrail.push({
+    event_id: `audit_disp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    case_id: excId,
+    action: disputeData.action_taken || 'DISPUTE_LOGGED',
+    event_type: disputeData.event_type || 'PAYPAL_DISPUTE_RECORDED',
+    entity_id: disputeData.resource_id,
+    details: {
+      event_id: eventId,
+      amount_minor: disputeData.amount_minor,
+      currency: disputeData.currency,
+      ...disputeData.details,
+    },
+    performed_by: 'PayPal Sandbox Webhook Receiver',
+    created_at: Date.now(),
+  });
+
+  if (disputeData.review_required) {
+    const existingExc = s.exceptions.find(e => e.id === excId || (disputeData.resource_id && e.order_id === disputeData.resource_id));
+    if (!existingExc) {
+      s.exceptions.unshift({
+        id: excId,
+        case_id: excId,
+        category: disputeData.exception_type || 'DISPUTE_REVERSAL',
+        amount_at_risk: disputeData.amount_minor || 0,
+        currency: disputeData.currency || 'USD',
+        status: 'OPEN',
+        priority: 'HIGH',
+        order_id: disputeData.resource_id,
+        description: `PayPal Dispute / Reversal: ${disputeData.details?.reason || disputeData.action_taken || 'Under Review'}`,
+        reconciliation_result_id: `recon_${disputeData.resource_id}`,
+        created_at: Math.floor(Date.now() / 1000),
+        source: 'PAYPAL_SANDBOX_WEBHOOK',
+      });
+    }
+  }
+
+  _savePayPalDiskState();
+}
+
+function getPayPalCaptures() {
+  const s = getStore();
+  return s.paypalCaptures;
+}
+
+// ── Durable Pre-Network Idempotency Key Registry ──────────────────────────────
+function registerIdempotencyKey(key, metadata = {}) {
+  const s = getStore();
+  if (!key) throw new Error('registerIdempotencyKey requires a key string.');
+  if (!s.paypalIdempotency) s.paypalIdempotency = new Map();
+
+  const previous = s.paypalIdempotency.get(key);
+  const record = {
+    key,
+    status: 'IN_FLIGHT',
+    metadata,
+    created_at: Date.now(),
+  };
+  s.paypalIdempotency.set(key, record);
+
+  try {
+    (module.exports._savePayPalDiskState || _savePayPalDiskState)(true);
+  } catch (err) {
+    // Rollback in-memory state on persistence failure so safe state is restored
+    if (previous !== undefined) {
+      s.paypalIdempotency.set(key, previous);
+    } else {
+      s.paypalIdempotency.delete(key);
+    }
+    throw new Error(`Durable persistence failed: unable to register idempotency key '${key}' before network call: ${err.message}`);
+  }
+
+  return record;
+}
+
+function getIdempotencyRecord(key) {
+  const s = getStore();
+  if (!s.paypalIdempotency) s.paypalIdempotency = new Map();
+  const rec = s.paypalIdempotency.get(key);
+  if (!rec) return null;
+
+  // Auto-expire stale IN_FLIGHT requests after timeout so retries are never permanently blocked
+  if (rec.status === 'IN_FLIGHT' && rec.created_at && (Date.now() - rec.created_at > IN_FLIGHT_TIMEOUT_MS)) {
+    rec.status = 'TIMED_OUT';
+    rec.expired = true;
+    _savePayPalDiskState();
+  }
+  return rec;
+}
+
+function completeIdempotencyKey(key, response) {
+  const s = getStore();
+  if (!s.paypalIdempotency) s.paypalIdempotency = new Map();
+  const existing = s.paypalIdempotency.get(key) || { key, created_at: Date.now() };
+  existing.status = 'COMPLETED';
+  existing.response = response;
+  existing.completed_at = Date.now();
+  s.paypalIdempotency.set(key, existing);
+  _savePayPalDiskState();
+  return existing;
+}
+
+function failIdempotencyKey(key, error) {
+  const s = getStore();
+  if (!s.paypalIdempotency) s.paypalIdempotency = new Map();
+  const existing = s.paypalIdempotency.get(key) || { key, created_at: Date.now() };
+  existing.status = 'FAILED';
+  existing.error = typeof error === 'string' ? error : error?.message || 'Unknown error';
+  existing.failed_at = Date.now();
+  s.paypalIdempotency.set(key, existing);
+  _savePayPalDiskState();
+  return existing;
+}
+
+// ── Durable Webhook Deduplication & Out-of-Order Resource State Registry ─────
+function recordWebhookEvent(eventId, eventData) {
+  const s = getStore();
+  if (!s.paypalWebhookEvents) s.paypalWebhookEvents = new Map();
+  s.paypalWebhookEvents.set(eventId, eventData);
+  _savePayPalDiskState();
+  return eventData;
+}
+
+function getWebhookEvent(eventId) {
+  const s = getStore();
+  if (!s.paypalWebhookEvents) s.paypalWebhookEvents = new Map();
+  return s.paypalWebhookEvents.get(eventId) || null;
+}
+
+function setResourceState(resourceId, stateData) {
+  const s = getStore();
+  if (!s.paypalResourceStates) s.paypalResourceStates = new Map();
+  s.paypalResourceStates.set(resourceId, stateData);
+  _savePayPalDiskState();
+  return stateData;
+}
+
+function getResourceState(resourceId) {
+  const s = getStore();
+  if (!s.paypalResourceStates) s.paypalResourceStates = new Map();
+  return s.paypalResourceStates.get(resourceId) || null;
+}
+
+function resetWebhookStorage() {
+  const s = getStore();
+  if (s.paypalWebhookEvents) s.paypalWebhookEvents.clear();
+  if (s.paypalResourceStates) s.paypalResourceStates.clear();
+  _savePayPalDiskState();
+}
+
 module.exports = {
   initEmpty,
   reset,
   clear,
   syncRazorpay,
   addPaymentTransaction,
+  addPayPalOrder,
+  registerPayPalOrder: addPayPalOrder,
+  getPayPalOrder,
+  getPayPalOrders,
+  addPayPalCapture,
+  getPayPalCaptures,
+  reconcilePayPalCapture,
+  recordDisputeAudit,
+  registerIdempotencyKey,
+  getIdempotencyRecord,
+  completeIdempotencyKey,
+  failIdempotencyKey,
+  recordWebhookEvent,
+  getWebhookEvent,
+  setResourceState,
+  getResourceState,
+  resetWebhookStorage,
+  _savePayPalDiskState,
+  _loadPayPalDiskState,
+  _clearPayPalDiskState,
+  getPayPalStoreFile,
+  IN_FLIGHT_TIMEOUT_MS,
+  getStore,
+  getPayPalCaptures,
+  reconcilePayPalCapture,
+  recordDisputeAudit,
+  registerIdempotencyKey,
+  getIdempotencyRecord,
+  completeIdempotencyKey,
+  failIdempotencyKey,
+  _savePayPalDiskState,
+  _loadPayPalDiskState,
+  _clearPayPalDiskState,
   getStore,
   getMode,
   getSettlementRecords,

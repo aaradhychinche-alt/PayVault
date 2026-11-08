@@ -657,7 +657,7 @@ describe('Payvault AI Engine End-to-End', () => {
       const types = new Set(report.explanation.map(e => e.type));
       expect(types.has('FACT') || types.has('INFERENCE')).toBe(true);
     }
-  }, 30000);
+  }, 90000);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

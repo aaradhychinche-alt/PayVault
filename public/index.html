@@ -11,9 +11,6 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
-  <!-- Razorpay Checkout SDK -->
-  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
-
   <script>
     window.filterReconciliationTable = function(filter) {
       document.querySelectorAll('#recon-status-filter-buttons .filter-pill-btn').forEach(function(btn) {
@@ -77,16 +74,8 @@
         <!-- Mode Status Pill -->
         <div class="header-pill-chip" id="mode-pill" title="Operational Mode">
           <span class="status-pulse-dot online"></span>
-          <span id="header-mode-text">LIVE TEST MODE</span>
+          <span id="header-mode-text">PAYPAL SANDBOX</span>
         </div>
-
-        <!-- Sync Button -->
-        <button class="btn-ghost-icon" id="btn-sync-razorpay" title="Sync live transactions from Razorpay Test Mode" type="button">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M1.5 7A5.5 5.5 0 0111 2.7M12.5 7A5.5 5.5 0 013 11.3M11 1.2v2.5H8.5M3 12.8v-2.5h2.5"/>
-          </svg>
-          <span class="btn-text-desktop">Sync</span>
-        </button>
 
         <!-- New Payment Primary CTA -->
         <button class="btn-primary-action" id="btn-header-new-payment" onclick="navigateTo('payment-new')" type="button">
@@ -162,7 +151,7 @@
       <div class="empty-state-banner" id="dashboard-empty-state" style="display:none;">
         <div class="empty-state-graphic">💳</div>
         <h2 class="empty-state-heading">No payment transactions recorded yet</h2>
-        <p class="empty-state-subtext">Process your first live test payment using Razorpay Checkout to start tracking real-time nodal settlement and automated ledger reconciliation.</p>
+        <p class="empty-state-subtext">Process your first test payment using PayPal Sandbox Orders v2 to start tracking real-time gateway capture and automated ledger reconciliation.</p>
         <div class="empty-state-buttons">
           <button class="btn-primary-action" onclick="navigateTo('payment-new')" type="button">+ Process Test Payment</button>
         </div>
@@ -253,6 +242,22 @@
         </div>
       </div>
 
+      <!-- PayPal Sandbox Dispute & Chargeback Alert Strip -->
+      <div class="dispute-alert-banner" id="dashboard-dispute-banner" style="display:none;margin-bottom:1.5rem;padding:1.2rem;background:#fff8f0;border:1px solid #f97316;border-radius:8px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem;">
+          <div style="display:flex;align-items:center;gap:0.75rem;">
+            <div style="font-size:1.8rem;">⚖️</div>
+            <div>
+              <div style="font-weight:700;color:#c2410c;font-size:1rem;">PayPal Customer Disputes Requiring Investigation</div>
+              <div style="font-size:0.85rem;color:#7c2d12;" id="dashboard-dispute-subtext">Active dispute events received via PayPal sandbox webhooks requiring evidence submission.</div>
+            </div>
+          </div>
+          <button class="btn-primary-action" style="background:#ea580c;border-color:#c2410c;" onclick="filterByDisputes()" type="button">
+            View Dispute Cases (<span id="dashboard-dispute-count">0</span>) →
+          </button>
+        </div>
+      </div>
+
       <!-- Dashboard Two-Column Section -->
       <div class="dashboard-split-grid">
         
@@ -324,7 +329,7 @@
       <div class="page-title-banner">
         <div>
           <h1 class="page-main-heading">Process New Payment</h1>
-          <p class="page-main-subtext">Trigger a local demo payment or real Razorpay transaction to trace end-to-end payment capture, simulated T+2 settlement, and reconciliation.</p>
+          <p class="page-main-subtext">Trigger a real PayPal Sandbox Orders v2 transaction or instant demo to trace end-to-end payment capture, settlement tracking, and reconciliation.</p>
         </div>
         <button class="btn-secondary-action" onclick="navigateTo('dashboard')" type="button">← Back to Overview</button>
       </div>
@@ -338,145 +343,286 @@
 
           <!-- Payment Processing Mode Toggle -->
           <div class="form-group">
-            <label class="form-label">Execution Mode</label>
+            <label class="form-label">Gateway Execution Mode</label>
             <div class="processing-mode-toggle">
-              <button class="mode-toggle-card active" id="btn-mode-local" onclick="setProcessingMode('local')" type="button">
+              <button class="mode-toggle-card active" id="btn-mode-paypal" onclick="setProcessingMode('paypal')" type="button">
+                <span class="mode-toggle-icon">🅿️</span>
+                <div class="mode-toggle-text">
+                  <strong>PayPal Sandbox (Exclusive)</strong>
+                  <span>Server Orders v2, buyer approval link & server-verified capture</span>
+                </div>
+              </button>
+              <button class="mode-toggle-card" id="btn-mode-local" onclick="setProcessingMode('local')" type="button">
                 <span class="mode-toggle-icon">⚡</span>
                 <div class="mode-toggle-text">
                   <strong>Local Demo (Instant)</strong>
                   <span>Direct local reconciliation simulation without external gateway</span>
                 </div>
               </button>
-              <button class="mode-toggle-card" id="btn-mode-razorpay" onclick="setProcessingMode('razorpay')" type="button">
-                <span class="mode-toggle-icon">💳</span>
-                <div class="mode-toggle-text">
-                  <strong>Razorpay Test Mode</strong>
-                  <span>Real Razorpay Checkout modal gateway popup</span>
-                </div>
-              </button>
             </div>
             <div id="mode-active-notice" style="margin-top:0.6rem;font-size:0.8rem;color:var(--color-text-muted);line-height:1.4;">
-              ⚡ <strong>Local Demo Mode:</strong> Instant offline deterministic execution. Zero external API credentials required.
+              🅿️ <strong>PayPal Sandbox Mode:</strong> Real server-created Orders v2 with returned approval link, buyer authorization, and verified capture evidence. Prices are server-controlled in integer minor units.
             </div>
           </div>
 
-          <!-- Amount Input -->
-          <div class="form-group">
-            <label class="form-label" for="custom-amount-input">Payment Amount (INR)</label>
-            <div class="amount-input-wrapper">
-              <span class="currency-symbol">₹</span>
-              <input type="number" id="custom-amount-input" class="amount-field font-mono" value="1000.00" min="1" max="500000" step="0.01" placeholder="0.00" />
+          <!-- ══════ PAYPAL SANDBOX PARAMETERS (PRIMARY) ══════ -->
+          <div id="paypal-parameters-container">
+            <div class="form-group">
+              <label class="form-label">Server-Controlled Product Tier</label>
+              <div class="method-cards-grid" style="grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));">
+                <label class="method-card active" for="tier-starter" onclick="selectPayPalProduct('TIER_STARTER', 10.00)">
+                  <input type="radio" id="tier-starter" name="paypal_tier" value="TIER_STARTER" checked />
+                  <div class="method-info">
+                    <span class="method-name" style="font-size:0.85rem;">Starter Pass</span>
+                    <strong style="color:var(--color-primary);font-size:0.95rem;">$10.00 USD</strong>
+                  </div>
+                </label>
+                <label class="method-card" for="tier-pro" onclick="selectPayPalProduct('TIER_PROFESSIONAL', 25.00)">
+                  <input type="radio" id="tier-pro" name="paypal_tier" value="TIER_PROFESSIONAL" />
+                  <div class="method-info">
+                    <span class="method-name" style="font-size:0.85rem;">Pro Suite</span>
+                    <strong style="color:var(--color-primary);font-size:0.95rem;">$25.00 USD</strong>
+                  </div>
+                </label>
+                <label class="method-card" for="tier-enterprise" onclick="selectPayPalProduct('TIER_ENTERPRISE', 100.00)">
+                  <input type="radio" id="tier-enterprise" name="paypal_tier" value="TIER_ENTERPRISE" />
+                  <div class="method-info">
+                    <span class="method-name" style="font-size:0.85rem;">Enterprise Tier</span>
+                    <strong style="color:var(--color-primary);font-size:0.95rem;">$100.00 USD</strong>
+                  </div>
+                </label>
+                <label class="method-card" for="tier-custom" onclick="selectPayPalProduct('CUSTOM_DEMO', null)">
+                  <input type="radio" id="tier-custom" name="paypal_tier" value="CUSTOM_DEMO" />
+                  <div class="method-info">
+                    <span class="method-name" style="font-size:0.85rem;">Custom Test</span>
+                    <span style="font-size:0.8rem;color:var(--color-text-muted);">Validated Range</span>
+                  </div>
+                </label>
+              </div>
             </div>
-            <div class="quick-chips-row">
-              <button class="quick-chip" onclick="setPaymentAmount(100)" type="button">₹100</button>
-              <button class="quick-chip" onclick="setPaymentAmount(500)" type="button">₹500</button>
-              <button class="quick-chip active" onclick="setPaymentAmount(1000)" type="button">₹1,000</button>
-              <button class="quick-chip" onclick="setPaymentAmount(5000)" type="button">₹5,000</button>
-              <button class="quick-chip" onclick="setPaymentAmount(12345)" type="button">₹12,345</button>
+
+            <!-- Custom Amount Input (shown if Custom selected) -->
+            <div class="form-group" id="paypal-custom-amount-group" style="display:none;">
+              <label class="form-label" for="paypal-custom-amount">Custom Amount (USD)</label>
+              <div class="amount-input-wrapper">
+                <span class="currency-symbol">$</span>
+                <input type="number" id="paypal-custom-amount" class="amount-field font-mono" value="15.00" min="1.00" max="5000.00" step="0.01" />
+              </div>
+              <span style="font-size:0.75rem;color:var(--color-text-muted);">Allowed: $1.00 to $5,000.00 (validated server-side in integer cents).</span>
             </div>
-          </div>
 
-          <!-- Customer Reference / Order Note -->
-          <div class="form-group">
-            <label class="form-label" for="payment-note-input">Merchant Order Reference (Optional)</label>
-            <input type="text" id="payment-note-input" class="text-input-field font-mono" placeholder="e.g. order_cust_9921" />
-          </div>
-
-          <!-- Payment Method Selector -->
-          <div class="form-group">
-            <label class="form-label">Payment Instrument</label>
-            <div class="method-cards-grid">
-              <label class="method-card active" for="method-card">
-                <input type="radio" id="method-card" name="payment_method" value="card" checked />
-                <div class="method-info">
-                  <span class="method-icon">💳</span>
-                  <span class="method-name">Credit / Debit Card</span>
-                </div>
-              </label>
-              <label class="method-card" for="method-upi">
-                <input type="radio" id="method-upi" name="payment_method" value="upi" />
-                <div class="method-info">
-                  <span class="method-icon">⚡</span>
-                  <span class="method-name">UPI / QR</span>
-                </div>
-              </label>
-              <label class="method-card" for="method-netbanking">
-                <input type="radio" id="method-netbanking" name="payment_method" value="netbanking" />
-                <div class="method-info">
-                  <span class="method-icon">🏦</span>
-                  <span class="method-name">Net Banking</span>
-                </div>
-              </label>
+            <!-- Customer Reference -->
+            <div class="form-group">
+              <label class="form-label" for="paypal-order-ref">Merchant Order Reference</label>
+              <input type="text" id="paypal-order-ref" class="text-input-field font-mono" placeholder="e.g. ord_sandbox_001" />
             </div>
-          </div>
 
-          <!-- Developer Exception Injection Simulator -->
-          <div class="form-group exception-simulator-box">
-            <div class="simulator-header">
-              <span class="simulator-label">🧪 Reconciliation Scenario Simulator</span>
-              <span class="simulator-tag">Evaluation Mode</span>
+            <!-- Create PayPal Order CTA -->
+            <button class="btn-checkout-primary" id="btn-paypal-create-order" onclick="handlePayPalCreateOrder()" type="button" style="background:#0070ba;margin-bottom:0.75rem;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M7.076 21.337H2.47a.641.641 0 0 1-.633-.74L4.944 3.72a.78.78 0 0 1 .77-.655h7.19c2.378 0 4.195.534 5.253 1.545 1.058 1.012 1.439 2.502 1.102 4.31-.703 3.77-3.23 5.714-7.306 5.714h-2.58l-1.42 6.07a.642.642 0 0 1-.633.533h-.244z"/>
+              </svg>
+              <span id="btn-paypal-create-label">Create PayPal Sandbox Order ($10.00 USD)</span>
+            </button>
+
+            <!-- Active Order Lifecycle Box (Revealed upon order creation) -->
+            <div id="paypal-order-lifecycle-box" style="display:none;padding:1rem;background:#f8fafc;border:1px solid #cbd5e1;border-radius:var(--radius-md);margin-top:0.75rem;">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem;">
+                <span style="font-weight:600;font-size:0.85rem;color:#0f172a;">PayPal Orders v2 Lifecycle State</span>
+                <span id="paypal-lifecycle-status-badge" class="status-pill warning">CREATED</span>
+              </div>
+              <div style="font-size:0.8rem;color:#334155;line-height:1.5;margin-bottom:0.75rem;">
+                <div>• <strong>Order ID:</strong> <span class="font-mono text-primary" id="paypal-display-order-id">—</span></div>
+                <div>• <strong>Server Amount:</strong> <span class="font-mono" id="paypal-display-amount">—</span></div>
+                <div>• <strong>Request Idempotency Key:</strong> <span class="font-mono" id="paypal-display-idempotency" style="font-size:0.75rem;color:#64748b;">—</span></div>
+              </div>
+              <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+                <a id="paypal-btn-approve-link" href="#" target="_blank" class="btn-secondary-action" style="text-decoration:none;display:inline-flex;align-items:center;gap:0.4rem;font-size:0.82rem;">
+                  <span>🔗 Open PayPal Approval Link</span>
+                </a>
+                <button class="btn-primary-action" id="btn-paypal-capture-order" onclick="handlePayPalCaptureOrder()" type="button" style="background:#059669;font-size:0.82rem;">
+                  <span>✓ Capture & Verify Payment</span>
+                </button>
+              </div>
+              <div style="margin-top:0.6rem;font-size:0.72rem;color:#64748b;line-height:1.3;">
+                🔒 <strong>Gateway Evidence Distinction:</strong> Captures are recorded as verified gateway transactions held in transit. As per banking reconciliation standards, gateway captures are strictly held in transit and distinct from bank nodal settlement batches.
+              </div>
             </div>
-            <select id="anomaly-select" class="dropdown-field">
-              <option value="CLEAN_MATCH" selected>Normal Payment (Clean Match — 100% Reconciled)</option>
-              <option value="FEE_TAX_VARIANCE">Inject Fee / GST Tax Variance (+₹25.00 fee discrepancy)</option>
-              <option value="MISSING_ORDER">Inject Missing Order (Settlement without merchant order ID)</option>
-              <option value="DUPLICATE">Inject Duplicate Settlement (Simulated double payout)</option>
-              <option value="ADJUSTMENT">Inject Unlinked Settlement Adjustment</option>
-              <option value="UNEXPLAINED">Inject Unexplained Shortfall Discrepancy</option>
-            </select>
-          </div>
 
-          <!-- Primary Action CTA -->
-          <button class="btn-checkout-primary" id="btn-pay-now" type="button">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="2" y="4" width="14" height="10" rx="2"/>
-              <path d="M2 8h14M5 11h2"/>
-            </svg>
-            <span id="btn-pay-label">Process Payment (₹1,000.00)</span>
+          </div><!-- /paypal-parameters-container -->
+
+
+          <!-- ══════ LOCAL DEMO PARAMETERS ══════ -->
+          <div id="legacy-parameters-container" style="display:none;">
+
+            <!-- Amount Input -->
+            <div class="form-group">
+              <label class="form-label" for="custom-amount-input">Payment Amount (INR)</label>
+              <div class="amount-input-wrapper">
+                <span class="currency-symbol">₹</span>
+                <input type="number" id="custom-amount-input" class="amount-field font-mono" value="1000.00" min="1" max="500000" step="0.01" placeholder="0.00" />
+              </div>
+              <div class="quick-chips-row">
+                <button class="quick-chip" onclick="setPaymentAmount(100)" type="button">₹100</button>
+                <button class="quick-chip" onclick="setPaymentAmount(500)" type="button">₹500</button>
+                <button class="quick-chip active" onclick="setPaymentAmount(1000)" type="button">₹1,000</button>
+                <button class="quick-chip" onclick="setPaymentAmount(5000)" type="button">₹5,000</button>
+                <button class="quick-chip" onclick="setPaymentAmount(12345)" type="button">₹12,345</button>
+              </div>
+            </div>
+
+            <!-- Customer Reference / Order Note -->
+            <div class="form-group">
+              <label class="form-label" for="payment-note-input">Merchant Order Reference (Optional)</label>
+              <input type="text" id="payment-note-input" class="text-input-field font-mono" placeholder="e.g. order_cust_9921" />
+            </div>
+
+            <!-- Payment Method Selector -->
+            <div class="form-group">
+              <label class="form-label">Payment Instrument</label>
+              <div class="method-cards-grid">
+                <label class="method-card active" for="method-card">
+                  <input type="radio" id="method-card" name="payment_method" value="card" checked />
+                  <div class="method-info">
+                    <span class="method-icon">💳</span>
+                    <span class="method-name">Credit / Debit Card</span>
+                  </div>
+                </label>
+                <label class="method-card" for="method-upi">
+                  <input type="radio" id="method-upi" name="payment_method" value="upi" />
+                  <div class="method-info">
+                    <span class="method-icon">⚡</span>
+                    <span class="method-name">UPI / QR</span>
+                  </div>
+                </label>
+                <label class="method-card" for="method-netbanking">
+                  <input type="radio" id="method-netbanking" name="payment_method" value="netbanking" />
+                  <div class="method-info">
+                    <span class="method-icon">🏦</span>
+                    <span class="method-name">Net Banking</span>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            <!-- Developer Exception Injection Simulator -->
+            <div class="form-group exception-simulator-box">
+              <div class="simulator-header">
+                <span class="simulator-label">🧪 Reconciliation Scenario Simulator</span>
+                <span class="simulator-tag">Evaluation Mode</span>
+              </div>
+              <select id="anomaly-select" class="dropdown-field">
+                <option value="CLEAN_MATCH" selected>Normal Payment (Clean Match — 100% Reconciled)</option>
+                <option value="FEE_TAX_VARIANCE">Inject Fee / GST Tax Variance (+₹25.00 fee discrepancy)</option>
+                <option value="MISSING_ORDER">Inject Missing Order (Settlement without merchant order ID)</option>
+                <option value="DUPLICATE">Inject Duplicate Settlement (Simulated double payout)</option>
+                <option value="ADJUSTMENT">Inject Unlinked Settlement Adjustment</option>
+                <option value="UNEXPLAINED">Inject Unexplained Shortfall Discrepancy</option>
+              </select>
+            </div>
+
+            <!-- Primary Action CTA -->
+            <button class="btn-checkout-primary" id="btn-pay-now" type="button">
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="2" y="4" width="14" height="10" rx="2"/>
+                <path d="M2 8h14M5 11h2"/>
+              </svg>
+              <span id="btn-pay-label">Process Payment (₹1,000.00)</span>
+            </button>
+          </div><!-- /legacy-parameters-container -->
           </button>
 
         </div>
 
         <!-- Right: Real-time Lifecycle Visualization Panel -->
         <div class="creation-lifecycle-card">
-          <h2 class="form-section-heading">Automated Reconciliation Pipeline</h2>
           
-          <!-- Lifecycle Visual Steps -->
-          <div class="lifecycle-steps-chain" id="payment-lifecycle-chain">
-            
-            <div class="chain-step active" id="step-payment">
-              <div class="chain-node-box">
-                <span class="chain-dot">1</span>
+          <!-- ══════ PAYPAL GATEWAY PIPELINE (VERIFIED SANDBOX FACTS ONLY) ══════ -->
+          <div id="paypal-lifecycle-chain">
+            <h2 class="form-section-heading">PayPal Sandbox Gateway Pipeline</h2>
+            <div class="lifecycle-steps-chain">
+              <div class="chain-step active" id="step-pp-order">
+                <div class="chain-node-box">
+                  <span class="chain-dot">1</span>
+                </div>
+                <div class="chain-content">
+                  <div class="chain-title">Orders v2 Creation</div>
+                  <div class="chain-desc" id="chain-desc-pp-order">Server-controlled intent CAPTURE with stable PayPal-Request-Id.</div>
+                  <div class="chain-meta font-mono" id="chain-meta-pp-order">—</div>
+                </div>
               </div>
-              <div class="chain-content">
-                <div class="chain-title">Payment Capture</div>
-                <div class="chain-desc" id="chain-desc-pay">Awaiting checkout execution via Razorpay Test Gateway.</div>
-                <div class="chain-meta font-mono" id="chain-meta-pay">—</div>
+
+              <div class="chain-step" id="step-pp-approve">
+                <div class="chain-node-box">
+                  <span class="chain-dot">2</span>
+                </div>
+                <div class="chain-content">
+                  <div class="chain-title">Buyer Sandbox Approval</div>
+                  <div class="chain-desc" id="chain-desc-pp-approve">Returned PayPal approval URL for buyer authorization.</div>
+                  <div class="chain-meta font-mono" id="chain-meta-pp-approve">—</div>
+                </div>
+              </div>
+
+              <div class="chain-step" id="step-pp-capture">
+                <div class="chain-node-box">
+                  <span class="chain-dot">3</span>
+                </div>
+                <div class="chain-content">
+                  <div class="chain-title">Server-Verified Gateway Capture</div>
+                  <div class="chain-desc" id="chain-desc-pp-capture">v2/checkout/orders/capture with anti-tamper amount & currency verification.</div>
+                  <div class="chain-meta font-mono" id="chain-meta-pp-capture">—</div>
+                </div>
               </div>
             </div>
 
-            <div class="chain-step" id="step-settlement">
-              <div class="chain-node-box">
-                <span class="chain-dot">2</span>
+            <div style="margin-top:1.2rem;padding:0.8rem;background:rgba(59,130,246,0.06);border-radius:var(--radius-md);border:1px solid rgba(59,130,246,0.15);font-size:0.75rem;color:var(--color-text-secondary);line-height:1.4;">
+              🛡️ <strong>Verified Gateway Capture:</strong> PayPal transactions record verified gateway captures held in transit. Captures are strictly separated from bank settlement batches; no fabricated fees, taxes, or settlement batches are invented.
+            </div>
+          </div>
+
+          <!-- ══════ LOCAL DEMO PIPELINE (LABELED SIMULATION BENCHMARK ONLY) ══════ -->
+          <div id="local-lifecycle-chain" style="display:none;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.8rem;">
+              <h2 class="form-section-heading" style="margin-bottom:0;">Offline Demo Pipeline</h2>
+              <span class="filter-pill-badge" style="background:#fef3c7;color:#b45309;font-weight:700;font-size:0.7rem;">🧪 SIMULATED BENCHMARK</span>
+            </div>
+            <p style="font-size:0.75rem;color:var(--color-text-muted);margin-bottom:1rem;line-height:1.4;">
+              Offline synthetic benchmark for algorithmic discrepancy and exception training only.
+            </p>
+            <div class="lifecycle-steps-chain" id="payment-lifecycle-chain">
+              <div class="chain-step active" id="step-payment">
+                <div class="chain-node-box">
+                  <span class="chain-dot">1</span>
+                </div>
+                <div class="chain-content">
+                  <div class="chain-title">Simulated Payment Capture</div>
+                  <div class="chain-desc" id="chain-desc-pay">Local offline transaction record created in paise.</div>
+                  <div class="chain-meta font-mono" id="chain-meta-pay">—</div>
+                </div>
               </div>
-              <div class="chain-content">
-                <div class="chain-title">T+2 Settlement Generation</div>
-                <div class="chain-desc" id="chain-desc-set">Simulated settlement record generated with 2% fee & 18% GST.</div>
-                <div class="chain-meta font-mono" id="chain-meta-set">—</div>
+
+              <div class="chain-step" id="step-settlement">
+                <div class="chain-node-box">
+                  <span class="chain-dot">2</span>
+                </div>
+                <div class="chain-content">
+                  <div class="chain-title">Simulated T+2 Settlement</div>
+                  <div class="chain-desc" id="chain-desc-set">Simulated benchmark record generated with 2% fee & 18% GST.</div>
+                  <div class="chain-meta font-mono" id="chain-meta-set">—</div>
+                </div>
+              </div>
+
+              <div class="chain-step" id="step-reconciliation">
+                <div class="chain-node-box">
+                  <span class="chain-dot">3</span>
+                </div>
+                <div class="chain-content">
+                  <div class="chain-title">Deterministic Reconciliation</div>
+                  <div class="chain-desc" id="chain-desc-recon">Matches settlement credit against test merchant expected ledger.</div>
+                  <div class="chain-meta font-mono" id="chain-meta-recon">—</div>
+                </div>
               </div>
             </div>
-
-            <div class="chain-step" id="step-reconciliation">
-              <div class="chain-node-box">
-                <span class="chain-dot">3</span>
-              </div>
-              <div class="chain-content">
-                <div class="chain-title">Deterministic Reconciliation</div>
-                <div class="chain-desc" id="chain-desc-recon">Matches settlement credit against merchant expected ledger.</div>
-                <div class="chain-meta font-mono" id="chain-meta-recon">—</div>
-              </div>
-            </div>
-
           </div>
 
         </div>
@@ -543,12 +689,46 @@
       
       <div class="page-title-banner">
         <div>
-          <h1 class="page-main-heading">Payments Ledger</h1>
-          <p class="page-main-subtext">All customer payments captured via Razorpay with real-time settlement & ledger tracking.</p>
+          <h1 class="page-main-heading">Payments & Gateway Captures</h1>
+          <p class="page-main-subtext">Verified PayPal Sandbox Orders v2 captures alongside legacy simulation records.</p>
         </div>
         <button class="btn-primary-action" onclick="navigateTo('payment-new')" type="button">+ Process Payment</button>
       </div>
 
+      <!-- 🅿️ PayPal Sandbox Verified Gateway Captures -->
+      <div class="table-container-card" style="margin-bottom:1.5rem;border-left:4px solid #0070ba;">
+        <div style="padding:1rem 1.25rem;border-bottom:1px solid var(--color-border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;">
+          <div>
+            <div style="display:flex;align-items:center;gap:0.5rem;">
+              <span style="font-size:1.1rem;">🅿️</span>
+              <strong style="font-size:0.95rem;color:var(--color-text-main);">PayPal Sandbox Verified Gateway Captures</strong>
+              <span class="status-pill info">PRIMARY GATEWAY</span>
+            </div>
+            <p style="font-size:0.75rem;color:var(--color-text-muted);margin-top:0.25rem;">
+              Server-verified Orders v2 captures. Held in gateway transit (strictly distinct from bank nodal settlement batches).
+            </p>
+          </div>
+          <span class="table-counts-label font-mono" id="paypal-table-count">0 captures</span>
+        </div>
+        <table class="fintech-table" id="paypal-ledger-table">
+          <thead>
+            <tr>
+              <th>Capture ID</th>
+              <th>Order ID</th>
+              <th>Currency</th>
+              <th>Minor Units (Cents)</th>
+              <th>Decimal Amount</th>
+              <th>Capture Status</th>
+              <th>Settlement Classification</th>
+            </tr>
+          </thead>
+          <tbody id="paypal-table-body">
+            <tr><td colspan="7" style="text-align:center;padding:1.5rem;color:var(--color-text-muted);">No PayPal Sandbox captures recorded yet. Use "+ Process Payment" to test.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Legacy / Simulated Payments Table -->
       <div class="table-container-card">
         <div class="table-toolbar">
           <div class="search-box-wrapper">
@@ -558,7 +738,10 @@
             </svg>
             <input type="text" id="search-payments" class="table-search-input font-mono" placeholder="Search by payment ID or order..." oninput="filterPaymentsTable()" />
           </div>
-          <div class="table-counts-label font-mono" id="payments-table-count">Showing 0 payments</div>
+          <div style="display:flex;align-items:center;gap:0.75rem;">
+            <span style="font-size:0.8rem;color:var(--color-text-muted);">Legacy & Simulated Records:</span>
+            <div class="table-counts-label font-mono" id="payments-table-count">Showing 0 payments</div>
+          </div>
         </div>
 
         <table class="fintech-table" id="payments-ledger-table">
@@ -723,6 +906,7 @@
                 <option value="ADJUSTMENT">Adjustment</option>
                 <option value="UNEXPLAINED">Unexplained Shortfall</option>
                 <option value="PARTIAL_REFUND">Partial Refund</option>
+                <option value="DISPUTE_REVERSAL">PayPal Dispute / Chargeback</option>
               </select>
             </div>
           </div>
@@ -797,6 +981,24 @@
                 </button>
               </div>
 
+            </div>
+
+            <!-- PayPal Dispute Reversal Notice (visible only for DISPUTE_REVERSAL cases) -->
+            <div class="investigation-core-card" id="view-dispute-detail-card" style="display:none;border-left:4px solid #ea580c;background:#fffaf0;margin-bottom:1rem;padding:1.25rem;">
+              <div style="display:flex;align-items:flex-start;gap:0.75rem;">
+                <div style="font-size:1.8rem;line-height:1;">⚖️</div>
+                <div style="flex:1;">
+                  <div style="font-weight:700;color:#c2410c;font-size:1.05rem;margin-bottom:0.25rem;">PayPal Customer Dispute / Chargeback Active</div>
+                  <div style="font-size:0.85rem;color:#7c2d12;margin-bottom:0.75rem;">A buyer dispute has reversed or frozen captured funds. This exception was ingested from PayPal Sandbox webhooks.</div>
+                  <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:0.75rem;background:#fff;padding:0.75rem;border-radius:6px;border:1px solid #fed7aa;font-size:0.82rem;">
+                    <div><span style="color:#9a3412;font-weight:600;">Dispute ID:</span> <span class="font-mono" id="view-dispute-id" style="font-weight:700;">-</span></div>
+                    <div><span style="color:#9a3412;font-weight:600;">Reason Code:</span> <span id="view-dispute-reason" style="font-weight:600;">-</span></div>
+                  </div>
+                  <div style="margin-top:0.75rem;font-size:0.83rem;color:#9a3412;">
+                    <strong>Recommended Action:</strong> <span id="view-dispute-action">-</span>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <!-- Inline Investigation Progress Component (Clean, Non-blocking, Connected) -->

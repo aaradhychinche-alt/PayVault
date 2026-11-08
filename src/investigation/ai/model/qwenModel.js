@@ -46,11 +46,23 @@ class QwenLocalModel {
             timeout: 1500,
           },
           (res) => {
-            if (res.statusCode >= 200 && res.statusCode < 300) {
-              resolve(true);
-            } else {
-              resolve(false);
-            }
+            let body = '';
+            res.on('data', chunk => { body += chunk; });
+            res.on('end', () => {
+              if (res.statusCode >= 200 && res.statusCode < 300) {
+                try {
+                  const data = JSON.parse(body);
+                  const names = (data.models || []).map(m => m.name || m.model);
+                  if (names.length > 0 && !names.includes(this.model)) {
+                    const qwenMatch = names.find(n => n.includes('qwen')) || names[0];
+                    if (qwenMatch) this.model = qwenMatch;
+                  }
+                } catch (_) {}
+                resolve(true);
+              } else {
+                resolve(false);
+              }
+            });
           }
         );
 

@@ -65,7 +65,7 @@ function derivePriority(c) {
   if (c.priority_info?.level) return c.priority_info.level;
   const cat = c.exception_category || c.category || '';
   const risk = c.amount_at_risk || 0;
-  if (cat === 'DUPLICATE' || cat === 'UNEXPLAINED' || (cat === 'FEE_TAX_VARIANCE' && risk >= 2000)) {
+  if (cat === 'DUPLICATE' || cat === 'UNEXPLAINED' || cat === 'DISPUTE_REVERSAL' || (cat === 'FEE_TAX_VARIANCE' && risk >= 2000)) {
     return 'HIGH';
   }
   if (risk > 0 || cat === 'MISSING_ORDER' || cat === 'PARTIAL_REFUND') {
@@ -86,6 +86,7 @@ function cleanCategoryLabel(cat) {
     ADJUSTMENT: 'Settlement Adjustment',
     UNEXPLAINED: 'Unexplained Shortfall',
     PARTIAL_REFUND: 'Partial Refund',
+    DISPUTE_REVERSAL: 'PayPal Dispute Reversal',
   };
   return labels[cat] || cat.replace(/_/g, ' ');
 }
@@ -207,19 +208,21 @@ function normalizeAuditEvent(a) {
 // ── Data Fetching & Sync ─────────────────────────────────────────────────────
 async function loadAllData() {
   try {
-    const [summaryRes, paymentsRes, settlementsRes, reconRes, invRes] = await Promise.all([
+    const [summaryRes, paymentsRes, settlementsRes, reconRes, invRes, paypalRes] = await Promise.all([
       fetch('/api/reconciliation/summary').then(r => r.json()),
       fetch('/api/payments').then(r => r.json()).catch(() => ({ payments: [] })),
       fetch('/api/settlements').then(r => r.json()).catch(() => ({ batches: [], records: [] })),
       fetch('/api/reconciliation/results').then(r => r.json()).catch(() => ({ results: [] })),
       fetch('/api/investigations').then(r => r.json()).catch(() => ({ cases: [], status_counts: {} })),
+      fetch('/api/paypal/transactions').then(r => r.json()).catch(() => ({ transactions: [] })),
     ]);
 
-    AppState.summary         = summaryRes || {};
-    AppState.payments        = (paymentsRes.payments || []).map(normalizePayment).reverse();
-    AppState.settlements     = settlementsRes || { batches: [], records: [] };
-    AppState.reconciliations = reconRes.results || [];
-    AppState.exceptions      = (invRes.cases || []).map(normalizeCase);
+    AppState.summary            = summaryRes || {};
+    AppState.payments           = (paymentsRes.payments || []).map(normalizePayment).reverse();
+    AppState.settlements        = settlementsRes || { batches: [], records: [] };
+    AppState.reconciliations    = reconRes.results || [];
+    AppState.exceptions         = (invRes.cases || []).map(normalizeCase);
+    AppState.paypalTransactions = paypalRes?.transactions || [];
 
     updateHeaderBadges();
     renderCurrentPage();
@@ -346,6 +349,22 @@ function renderDashboard() {
   const elCntRes = document.getElementById('dash-cnt-resolved-cases');
   if (elCntRes) elCntRes.textContent = `${resolvedCases.length} cases resolved`;
 
+  // Active Dispute Alerts
+  const disputeExceptions = AppState.exceptions.filter(c => (c.exception_category === 'DISPUTE_REVERSAL' || c.category === 'DISPUTE_REVERSAL') && c.status !== 'RESOLVED');
+  const disputeBanner = document.getElementById('dashboard-dispute-banner');
+  const disputeCount = document.getElementById('dashboard-dispute-count');
+  const disputeSub = document.getElementById('dashboard-dispute-subtext');
+  if (disputeBanner) {
+    if (disputeExceptions.length > 0) {
+      disputeBanner.style.display = 'block';
+      if (disputeCount) disputeCount.textContent = disputeExceptions.length;
+      const disputeExposure = disputeExceptions.reduce((sum, e) => sum + (e.amount_at_risk || 0), 0);
+      if (disputeSub) disputeSub.textContent = `${disputeExceptions.length} active customer dispute(s) totaling ${formatINR(disputeExposure)} under review. Evidence submission required to contest reversal.`;
+    } else {
+      disputeBanner.style.display = 'none';
+    }
+  }
+
   // Money Flow Strip Calculation
   const gross = totalPaise;
   const fee   = Math.round(gross * 0.02);
@@ -395,7 +414,7 @@ function renderDashboard() {
           <td colspan="4" style="text-align:center;padding:2.5rem 1.5rem;color:var(--color-text-muted);">
             <div style="font-size:1.5rem;margin-bottom:0.4rem;">💳</div>
             <div style="font-weight:700;color:var(--color-text-primary);margin-bottom:0.25rem;font-size:0.9rem;">No recent payment transactions</div>
-            <div style="font-size:0.8rem;color:var(--color-text-muted);">Payments captured via Razorpay Checkout or Local Demo will automatically appear here.</div>
+            <div style="font-size:0.8rem;color:var(--color-text-muted);">Payments captured via PayPal Sandbox or Local Demo will automatically appear here.</div>
           </td>
         </tr>`;
     } else {
@@ -441,26 +460,236 @@ function showToast(message, type = 'info') {
 }
 
 // ── Payment Processing Mode State & Toggle ───────────────────────────────────
-let currentProcessingMode = 'local'; // 'local' (offline zero-credential) or 'razorpay' (real gateway)
+let currentProcessingMode = 'paypal'; // 'paypal' (primary sandbox Orders v2) or 'local'
+let currentPayPalProduct = 'TIER_STARTER';
+let currentPayPalActiveOrder = null;
 
 function setProcessingMode(mode) {
-  currentProcessingMode = mode;
-  const btnLocal = document.getElementById('btn-mode-local');
-  const btnRzp   = document.getElementById('btn-mode-razorpay');
-  const noticeEl = document.getElementById('mode-active-notice');
+  currentProcessingMode = mode === 'local' ? 'local' : 'paypal';
+  const btnPayPal = document.getElementById('btn-mode-paypal');
+  const btnLocal  = document.getElementById('btn-mode-local');
+  const noticeEl  = document.getElementById('mode-active-notice');
+  const paypalContainer = document.getElementById('paypal-parameters-container');
+  const legacyContainer = document.getElementById('legacy-parameters-container');
+  const ppChain         = document.getElementById('paypal-lifecycle-chain');
+  const localChain      = document.getElementById('local-lifecycle-chain');
 
-  if (btnLocal) btnLocal.classList.toggle('active', mode === 'local');
-  if (btnRzp)   btnRzp.classList.toggle('active', mode === 'razorpay');
+  if (btnPayPal) btnPayPal.classList.toggle('active', currentProcessingMode === 'paypal');
+  if (btnLocal)  btnLocal.classList.toggle('active', currentProcessingMode === 'local');
+
+  if (paypalContainer) paypalContainer.style.display = (currentProcessingMode === 'paypal') ? 'block' : 'none';
+  if (legacyContainer) legacyContainer.style.display = (currentProcessingMode === 'local') ? 'block' : 'none';
+  if (ppChain)         ppChain.style.display         = (currentProcessingMode === 'paypal') ? 'block' : 'none';
+  if (localChain)      localChain.style.display      = (currentProcessingMode === 'local') ? 'block' : 'none';
 
   if (noticeEl) {
-    if (mode === 'local') {
-      noticeEl.innerHTML = '⚡ <strong>Local Demo Mode:</strong> Instant offline deterministic execution. Zero external API credentials required.';
+    if (currentProcessingMode === 'paypal') {
+      noticeEl.innerHTML = '🅿️ <strong>PayPal Sandbox Mode:</strong> Real server-created Orders v2 with returned approval link, buyer authorization, and verified capture evidence. Prices are server-controlled in integer minor units.';
     } else {
-      noticeEl.innerHTML = '💳 <strong>Razorpay Test Mode:</strong> Opening official Razorpay Checkout modal popup with test credentials from .env.';
+      noticeEl.innerHTML = '⚡ <strong>Local Demo Mode:</strong> Instant offline deterministic execution. Zero external API credentials required.';
     }
   }
 
   updatePayButtonLabel();
+}
+
+function selectPayPalProduct(productId, price) {
+  currentPayPalProduct = productId;
+  const customGroup = document.getElementById('paypal-custom-amount-group');
+  if (customGroup) {
+    customGroup.style.display = (productId === 'CUSTOM_DEMO') ? 'block' : 'none';
+  }
+
+  const createLabel = document.getElementById('btn-paypal-create-label');
+  if (createLabel) {
+    if (productId === 'CUSTOM_DEMO') {
+      createLabel.textContent = 'Create PayPal Sandbox Order (Custom Amount)';
+    } else {
+      createLabel.textContent = `Create PayPal Sandbox Order ($${price.toFixed(2)} USD)`;
+    }
+  }
+}
+
+async function handlePayPalCreateOrder() {
+  const btn = document.getElementById('btn-paypal-create-order');
+  const refInput = document.getElementById('paypal-order-ref');
+  const customInput = document.getElementById('paypal-custom-amount');
+  const lifecycleBox = document.getElementById('paypal-order-lifecycle-box');
+  const statusBadge = document.getElementById('paypal-lifecycle-status-badge');
+  const displayOrderId = document.getElementById('paypal-display-order-id');
+  const displayAmount = document.getElementById('paypal-display-amount');
+  const displayIdempotency = document.getElementById('paypal-display-idempotency');
+  const approveLinkBtn = document.getElementById('paypal-btn-approve-link');
+
+  if (btn) btn.disabled = true;
+
+  try {
+    const referenceId = (refInput && refInput.value.trim()) || `ref_sb_${Date.now().toString(36)}`;
+    const idempotencyKey = `idemp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+
+    let customMinor = null;
+    if (currentPayPalProduct === 'CUSTOM_DEMO') {
+      const val = parseFloat(customInput ? customInput.value : 15.00) || 15.00;
+      customMinor = Math.round(val * 100);
+    }
+
+    // Step 1 node in PayPal chain
+    const stepPPOrder   = document.getElementById('step-pp-order');
+    const descPPOrder   = document.getElementById('chain-desc-pp-order');
+    const metaPPOrder   = document.getElementById('chain-meta-pp-order');
+    const stepPPApprove = document.getElementById('step-pp-approve');
+    const descPPApprove = document.getElementById('chain-desc-pp-approve');
+    const metaPPApprove = document.getElementById('chain-meta-pp-approve');
+
+    if (stepPPOrder) stepPPOrder.classList.add('active');
+    if (descPPOrder) descPPOrder.textContent = 'Calling PayPal Orders v2 API (/v2/checkout/orders)...';
+
+    const res = await fetch('/api/paypal/create-order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        product_id: currentPayPalProduct,
+        amount_minor: customMinor,
+        currency: 'USD',
+        reference_id: referenceId,
+        idempotency_key: idempotencyKey,
+      }),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to create PayPal order.');
+    }
+
+    currentPayPalActiveOrder = data;
+
+    if (stepPPOrder) { stepPPOrder.classList.remove('active'); stepPPOrder.classList.add('completed'); }
+    if (descPPOrder) descPPOrder.textContent = `Order Created: ${data.order_id}`;
+    if (metaPPOrder) metaPPOrder.textContent = `PayPal-Request-Id: ${data.idempotency_key}`;
+    if (stepPPApprove) stepPPApprove.classList.add('active');
+    if (descPPApprove) descPPApprove.textContent = data.approve_url ? 'Awaiting buyer sandbox authorization...' : 'Order ready for capture.';
+    if (metaPPApprove) metaPPApprove.textContent = data.approve_url ? 'Click "Approve on PayPal Sandbox" below' : 'Pre-approved';
+
+    // Reveal lifecycle box
+    if (lifecycleBox) lifecycleBox.style.display = 'block';
+    if (statusBadge) {
+      statusBadge.textContent = data.status || 'CREATED';
+      statusBadge.className = 'status-pill warning';
+    }
+    if (displayOrderId) displayOrderId.textContent = data.order_id;
+    if (displayAmount) displayAmount.textContent = `$${data.amount_decimal} ${data.currency} (${data.amount_minor} cents)`;
+    if (displayIdempotency) displayIdempotency.textContent = data.idempotency_key;
+
+    if (approveLinkBtn) {
+      if (data.approve_url) {
+        approveLinkBtn.href = data.approve_url;
+        approveLinkBtn.style.display = 'inline-flex';
+      } else {
+        approveLinkBtn.style.display = 'none';
+      }
+    }
+
+    if (descPay) descPay.textContent = `Order ${data.order_id} created. Awaiting buyer approval & capture.`;
+    if (metaPay) metaPay.textContent = `Order: ${data.order_id} | $${data.amount_decimal} USD`;
+
+    showToast(`PayPal Sandbox Order ${data.order_id} created!`, 'success');
+
+  } catch (err) {
+    console.error('[handlePayPalCreateOrder] Error:', err);
+    showToast(err.message, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function handlePayPalCaptureOrder() {
+  if (!currentPayPalActiveOrder || !currentPayPalActiveOrder.order_id) {
+    showToast('Please create a PayPal order first before capturing.', 'error');
+    return;
+  }
+
+  const btn = document.getElementById('btn-paypal-capture-order');
+  const statusBadge = document.getElementById('paypal-lifecycle-status-badge');
+  const descPay = document.getElementById('chain-desc-pay');
+  const descSet = document.getElementById('chain-desc-set');
+  const descRecon = document.getElementById('chain-desc-recon');
+  const stepPay = document.getElementById('step-payment');
+  const stepSet = document.getElementById('step-settlement');
+  const stepRecon = document.getElementById('step-reconciliation');
+
+  if (btn) btn.disabled = true;
+
+  try {
+    const orderId = currentPayPalActiveOrder.order_id;
+    const idempotencyKey = `cap_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+
+    if (descPay) descPay.textContent = `Executing server-verified capture via PayPal v2 API...`;
+
+    const res = await fetch('/api/paypal/capture-order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        order_id: orderId,
+        idempotency_key: idempotencyKey,
+      }),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to capture PayPal order.');
+    }
+
+    if (statusBadge) {
+      statusBadge.textContent = 'COMPLETED';
+      statusBadge.className = 'status-pill success';
+    }
+
+    // Step updates for PayPal chain
+    const stepPPApprove = document.getElementById('step-pp-approve');
+    const stepPPCapture = document.getElementById('step-pp-capture');
+    const descPPCapture = document.getElementById('chain-desc-pp-capture');
+    const metaPPCapture = document.getElementById('chain-meta-pp-capture');
+
+    if (stepPPApprove) { stepPPApprove.classList.remove('active'); stepPPApprove.classList.add('completed'); }
+    if (stepPPCapture) { stepPPCapture.classList.remove('active'); stepPPCapture.classList.add('completed'); }
+    if (descPPCapture) descPPCapture.textContent = `Capture completed: ${data.capture_id}`;
+    if (metaPPCapture) metaPPCapture.textContent = `Verified Amount: $${data.amount_decimal} ${data.currency} (Gateway Transit)`;
+
+    // Render Confirmation View
+    const setupPanel = document.getElementById('payment-setup-container');
+    const confirmPanel = document.getElementById('payment-confirmation-container');
+    if (setupPanel) setupPanel.style.display = 'none';
+    if (confirmPanel) confirmPanel.style.display = 'block';
+
+    const valPayId = document.getElementById('confirm-val-pay-id');
+    const valOrderId = document.getElementById('confirm-val-order-id');
+    const valGross = document.getElementById('confirm-val-gross');
+    const valNet = document.getElementById('confirm-val-net');
+    const valStatus = document.getElementById('confirm-val-status');
+    const valSettlement = document.getElementById('confirm-val-settlement');
+    const mainTitle = document.getElementById('confirm-main-title');
+    const subTitle = document.getElementById('confirm-sub-title');
+
+    if (mainTitle) mainTitle.textContent = 'PayPal Sandbox Payment Captured & Verified';
+    if (subTitle) subTitle.textContent = 'PayPal Orders v2 capture completed with strict minor-unit amount verification. Recorded as gateway capture held in transit (distinct from bank settlement).';
+    if (valPayId) valPayId.textContent = data.capture_id;
+    if (valOrderId) valOrderId.textContent = data.order_id;
+    if (valGross) valGross.textContent = `$${data.amount_decimal} ${data.currency}`;
+    if (valNet) valNet.textContent = `$${data.amount_decimal} ${data.currency} (Transit)`;
+    if (valStatus) valStatus.innerHTML = '<span class="status-pill success">CAPTURED (GATEWAY)</span>';
+    if (valSettlement) valSettlement.textContent = 'GATEWAY_TRANSIT (Not Bank Batch)';
+
+    showToast(`PayPal Capture ${data.capture_id} verified successfully!`, 'success');
+
+    // Reload data in background
+    await loadAllData();
+
+  } catch (err) {
+    console.error('[handlePayPalCaptureOrder] Error:', err);
+    showToast(err.message, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function updatePayButtonLabel() {
@@ -469,11 +698,7 @@ function updatePayButtonLabel() {
   const amountPaise = Math.round(amountRupees * 100);
   const payBtnLabel = document.getElementById('btn-pay-label');
   if (payBtnLabel) {
-    if (currentProcessingMode === 'local') {
-      payBtnLabel.textContent = `Process Payment (${formatINR(amountPaise)})`;
-    } else {
-      payBtnLabel.textContent = `Pay ${formatINR(amountPaise)} via Razorpay Gateway`;
-    }
+    payBtnLabel.textContent = `Process Demo Payment (${formatINR(amountPaise)})`;
   }
 }
 
@@ -674,161 +899,37 @@ async function handlePaymentSubmit() {
     }
     return;
   }
-
-  // ── FLOW B: REAL RAZORPAY GATEWAY PAYMENT ─────────────────────────────────
-  if (payBtnLabel) payBtnLabel.textContent = 'Opening Razorpay Checkout…';
-
-  try {
-    const orderRes = await fetch('/api/create-order', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        amount: amountPaise,
-        receipt: customerRef,
-      }),
-    });
-
-    const orderData = await orderRes.json();
-    if (!orderRes.ok || !orderData.order_id) {
-      const errorMsg = (orderRes.status === 401 || (orderData.error && orderData.error.toLowerCase().includes('authentication')))
-        ? 'Razorpay Test Mode could not be initialized. Check your TEST API credentials.'
-        : (orderData.error || 'Failed to initialize Razorpay order.');
-      throw new Error(errorMsg);
-    }
-
-    if (typeof window.Razorpay !== 'function') {
-      throw new Error('Razorpay Checkout SDK is not available. Please verify network or disable adblocker.');
-    }
-
-    const options = {
-      key: orderData.key_id,
-      amount: orderData.amount,
-      currency: orderData.currency || 'INR',
-      name: 'Payvault Merchant Operations',
-      description: `Reconciliation Pipeline Test (${cleanCategoryLabel(anomalyType)})`,
-      order_id: orderData.order_id,
-      handler: async function (response) {
-        await processPaymentVerification(response, amountPaise, anomalyType, customerRef, method);
-      },
-      prefill: {
-        name: 'Aaradhy Chinche',
-        email: 'aaradhy@payvault.test',
-        contact: '9999999999',
-      },
-      theme: { color: '#090d16' },
-      modal: {
-        ondismiss: function () {
-          if (payBtn) {
-            payBtn.disabled = false;
-            updatePayButtonLabel();
-          }
-          showToast('Razorpay checkout modal closed.', 'info');
-        },
-      },
-    };
-
-    const rzp = new window.Razorpay(options);
-    rzp.on('payment.failed', function (resp) {
-      showToast(`Razorpay payment failed: ${resp.error?.description || 'Declined'}`, 'error');
-    });
-    rzp.open();
-  } catch (err) {
-    showToast(err.message, 'error');
-  } finally {
-    if (payBtn) {
-      payBtn.disabled = false;
-      updatePayButtonLabel();
-    }
-  }
-}
-
-async function processPaymentVerification(razorpayResponse, amountPaise, anomalyType, customerRef, method) {
-  console.log('[processPaymentVerification] Called with:', { 
-    razorpayResponse, 
-    amountPaise, 
-    anomalyType, 
-    customerRef, 
-    method 
-  });
-
-  const step1 = document.getElementById('step-payment');
-  if (step1) step1.classList.add('completed');
-  const metaPay = document.getElementById('chain-meta-pay');
-  if (metaPay) metaPay.textContent = `Captured: ${razorpayResponse.razorpay_payment_id}`;
-
-  const step2 = document.getElementById('step-settlement');
-  if (step2) step2.classList.add('active');
-
-  try {
-    const verifyRes = await fetch('/api/verify-payment', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ...razorpayResponse,
-        amount: amountPaise,
-        simulate_exception: anomalyType,
-        receipt: customerRef,
-        method: method,
-      }),
-    });
-
-    const verifyData = await verifyRes.json();
-    console.log('[processPaymentVerification] Backend response:', verifyData);
-    
-    if (!verifyRes.ok) throw new Error(verifyData.error || 'Payment verification failed.');
-
-    if (step2) step2.classList.add('completed');
-    const metaSet = document.getElementById('chain-meta-set');
-    if (metaSet) metaSet.textContent = `Settled (T+2): ${verifyData.settlement_id || 'setl_live'}`;
-
-    const step3 = document.getElementById('step-reconciliation');
-    if (step3) step3.classList.add('active', 'completed');
-    const isException = !!verifyData.exception || verifyData.reconciliation_status === 'EXCEPTION';
-    const metaRecon = document.getElementById('chain-meta-recon');
-    if (metaRecon) {
-      metaRecon.textContent = isException
-        ? `Discrepancy: ${cleanCategoryLabel(verifyData.exception?.category || verifyData.reconciliation_status)}`
-        : `Reconciliation Status: MATCHED (Clean)`;
-    }
-
-    // Transition to dedicated confirmation panel
-    console.log('[processPaymentVerification] Calling showPaymentConfirmation with amount_paise:', amountPaise);
-    
-    showPaymentConfirmation({
-      payment_id: razorpayResponse.razorpay_payment_id,
-      order_id: razorpayResponse.razorpay_order_id,
-      amount_paise: amountPaise,  // <-- Explicitly pass the parameter name
-      settlement_record: {
-        credit: verifyData.net_credit_paise,
-        settlement_id: verifyData.settlement_id,
-      },
-      is_exception: isException,
-      exception: verifyData.exception,
-    });
-
-    if (isException) {
-      showToast(`Razorpay payment captured. Discrepancy detected (${cleanCategoryLabel(verifyData.exception?.category)}).`, 'warning');
-    } else {
-      showToast(`Razorpay payment ${razorpayResponse.razorpay_payment_id} successfully captured and reconciled!`, 'success');
-    }
-
-    await loadAllData();
-  } catch (err) {
-    console.error('[processPaymentVerification] Error:', err);
-    showToast(`Verification error: ${err.message}`, 'error');
-  } finally {
-    const payBtn = document.getElementById('btn-pay-now');
-    if (payBtn) {
-      payBtn.disabled = false;
-      updatePayButtonLabel();
-    }
-  }
 }
 
 // ── Page 3: Payments Table ───────────────────────────────────────────────────
 function renderPaymentsTable() {
   const tbody = document.getElementById('payments-table-body');
   const countLabel = document.getElementById('payments-table-count');
+  const ppBody = document.getElementById('paypal-table-body');
+  const ppCount = document.getElementById('paypal-table-count');
+
+  // 1. Render PayPal Sandbox Captures (Primary Gateway)
+  const ppCaptures = AppState.paypalTransactions || [];
+  if (ppCount) ppCount.textContent = `${ppCaptures.length} captures`;
+  if (ppBody) {
+    if (ppCaptures.length === 0) {
+      ppBody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:1.5rem;color:var(--color-text-muted);">No PayPal Sandbox captures recorded yet. Use "+ Process Payment" to test.</td></tr>`;
+    } else {
+      ppBody.innerHTML = ppCaptures.map(c => `
+        <tr>
+          <td class="font-mono" style="font-weight:700;color:#0070ba;">${c.capture_id}</td>
+          <td class="font-mono">${c.order_id || '—'}</td>
+          <td class="font-mono"><span class="status-pill info">${c.currency}</span></td>
+          <td class="font-mono">${c.amount_minor || '—'}</td>
+          <td class="font-mono" style="font-weight:700;">$${c.amount_decimal}</td>
+          <td><span class="status-pill success">${c.capture_status || 'COMPLETED'}</span></td>
+          <td style="font-size:0.75rem;color:#64748b;"><span class="status-pill neutral">GATEWAY_TRANSIT</span> (Not Bank Batch)</td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // 2. Render Legacy / Simulated Payments Table
   if (!tbody) return;
 
   const payments = AppState.payments;
@@ -1030,6 +1131,15 @@ if (typeof window !== 'undefined') {
   window.filterReconciliationTable = filterReconciliationTable;
   window.searchReconciliationTable = searchReconciliationTable;
   window.renderReconciliationTable = renderReconciliationTable;
+  window.filterByDisputes = function() {
+    navigateTo('investigations');
+    const catFilter = document.getElementById('case-filter-select');
+    if (catFilter) {
+      catFilter.value = 'DISPUTE_REVERSAL';
+      AppState.activeCategoryFilter = 'DISPUTE_REVERSAL';
+      renderInvestigationQueue();
+    }
+  };
 }
 
 // ── Page 6: Investigations Workstation (Chunks 2, 3, 4) ──────────────────────
@@ -1427,6 +1537,22 @@ function renderInvestigationDetail(c) {
     <span class="meta-chip font-mono">Method: ${c.settlement_record?.payment_method || 'CARD'}</span>
   `;
 
+  // PayPal Dispute Reversal Alert Card
+  const disputeCard = document.getElementById('view-dispute-detail-card');
+  if (disputeCard) {
+    if (c.exception_category === 'DISPUTE_REVERSAL') {
+      disputeCard.style.display = 'block';
+      const idEl = document.getElementById('view-dispute-id');
+      const reasonEl = document.getElementById('view-dispute-reason');
+      const actionEl = document.getElementById('view-dispute-action');
+      if (idEl) idEl.textContent = c.dispute_data?.dispute_id || c.dispute_id || 'DISPUTE-SANDBOX';
+      if (reasonEl) reasonEl.textContent = c.dispute_data?.reason || c.root_cause || 'Customer reported unauthorized or unfulfilled transaction';
+      if (actionEl) actionEl.textContent = c.suggested_actions?.[0]?.description || 'Upload shipping proof & invoice evidence in PayPal Resolution Center to contest reversal.';
+    } else {
+      disputeCard.style.display = 'none';
+    }
+  }
+
   // Action Buttons Visibility & Banner State
   const runBtn = document.getElementById('btn-run-investigation');
   const resolveBtn = document.getElementById('btn-open-resolve');
@@ -1712,7 +1838,7 @@ function renderInvestigationDetail(c) {
       </div>
       <div style="color:var(--color-text-tertiary);font-weight:800;">───→</div>
       <div style="text-align:center;">
-        <span style="font-size:0.7rem;font-weight:800;color:var(--color-text-muted);display:block;">RAZORPAY PAYMENT</span>
+        <span style="font-size:0.7rem;font-weight:800;color:var(--color-text-muted);display:block;">PAYMENT CAPTURE</span>
         <span class="font-mono" style="font-size:0.85rem;font-weight:700;color:var(--color-primary);">${c.settlement_record?.entity_id || 'pay_test_mode'}</span>
       </div>
       <div style="color:var(--color-text-tertiary);font-weight:800;">───→</div>
@@ -2137,22 +2263,6 @@ async function reopenCase() {
 }
 
 // ── Utility Sync / Benchmark Handlers ─────────────────────────────────────────
-async function syncRazorpayData() {
-  const btn = document.getElementById('btn-sync-razorpay');
-  if (btn) btn.style.opacity = '0.5';
-
-  try {
-    const res = await fetch('/api/demo/sync-razorpay', { method: 'POST' });
-    const data = await res.json();
-    showToast(`Synced with Razorpay Test Mode (${data.total_payments || 0} payments)`, 'success');
-    await loadAllData();
-  } catch (err) {
-    showToast(`Sync failed: ${err.message}`, 'error');
-  } finally {
-    if (btn) btn.style.opacity = '1';
-  }
-}
-
 async function loadBenchmarkDataset() {
   try {
     const res = await fetch('/api/demo/reset-synthetic', { method: 'POST' });
@@ -2200,10 +2310,6 @@ if (typeof document !== 'undefined') {
         if (page) navigateTo(page);
       });
     });
-
-    // Top header button listeners
-    const btnSync = document.getElementById('btn-sync-razorpay');
-    if (btnSync) btnSync.addEventListener('click', syncRazorpayData);
 
     // Payment method selector active toggle
     document.querySelectorAll('.method-card').forEach(card => {
@@ -2289,8 +2395,21 @@ if (typeof document !== 'undefined') {
       chatSendBtn.addEventListener('click', () => sendChatMessage());
     }
 
+    // Initialize default gateway mode to PayPal Sandbox (Orders v2)
+    setProcessingMode('paypal');
+
     // Load initial data
     loadAllData();
+
+    // Check initial hash route
+    if (window.location.hash) {
+      const targetPage = window.location.hash.replace('#', '');
+      if (targetPage) navigateTo(targetPage);
+    }
+    window.addEventListener('hashchange', () => {
+      const p = window.location.hash.replace('#', '');
+      if (p) navigateTo(p);
+    });
   });
 }
 
@@ -2397,7 +2516,7 @@ function chatSuggestedClick(btn) {
 
 /**
  * Updates the provenance badge in the chat panel header.
- * Only shows Ollama/AI label when ai_used===true in the actual response.
+ * Reflects whether local Ollama or native reasoning generated the response.
  */
 function setChatProvenance({ ai_used, model } = {}) {
   const badge = document.getElementById('chat-provenance-badge');
@@ -2405,8 +2524,12 @@ function setChatProvenance({ ai_used, model } = {}) {
   const label = document.getElementById('chat-prov-label');
   if (!label) return;
 
-  if (dot)  dot.className = 'chat-prov-dot online';
-  label.textContent = 'Payvault AI';
+  if (dot) dot.className = 'chat-prov-dot online';
+  if (model) {
+    label.textContent = model;
+  } else {
+    label.textContent = 'Payvault AI';
+  }
 }
 
 /**
@@ -2474,11 +2597,13 @@ async function sendChatMessage() {
 
     // Render Payvault AI answer
     appendChatMessage({
-      role:    'payvault',
-      content: data.answer,
-      source:  data.source,
-      ai_used: data.ai_used,
-      model:   data.model || 'Payvault AI',
+      role:                        'payvault',
+      content:                     data.answer,
+      source:                      data.source,
+      ai_used:                     data.ai_used,
+      model:                       data.model_used || data.model || 'Payvault AI',
+      answer_composed_by:          data.answer_composed_by,
+      unverified_model_commentary: data.unverified_model_commentary,
     });
 
     // Update provenance badge
@@ -2503,7 +2628,7 @@ async function sendChatMessage() {
  * Renders a single chat message bubble.
  * Converts lightweight markdown (bold, italic, bullets) to safe HTML.
  */
-function appendChatMessage({ role, content, source, ai_used, model }) {
+function appendChatMessage({ role, content, source, ai_used, model, answer_composed_by, unverified_model_commentary }) {
   const conversation = document.getElementById('chat-conversation');
   const emptyState   = document.getElementById('chat-empty-state');
   if (!conversation) return null;
@@ -2513,16 +2638,25 @@ function appendChatMessage({ role, content, source, ai_used, model }) {
   const isOperator = role === 'operator';
   const senderLabel = isOperator ? 'Operator' : 'Payvault AI';
 
-  // Source note for AI messages: always unified Payvault AI evidence grounding
+  // Source note for AI messages: honest provenance
   let sourceLine = '';
+  let commentarySection = '';
   if (!isOperator) {
+    if (unverified_model_commentary) {
+      commentarySection = `
+        <div style="margin-top:0.6rem;padding:0.5rem 0.75rem;background:rgba(234,179,8,0.08);border-left:3px solid #eab308;border-radius:4px;font-size:0.75rem;color:#94a3b8;line-height:1.35;">
+          <strong style="color:#eab308;display:block;margin-bottom:0.2rem;">⚠️ UNVERIFIED LOCAL MODEL PROSE (${escapeHtml(model || 'Ollama')}):</strong>
+          <span>${renderChatMarkdown(unverified_model_commentary.replace(/^\[UNVERIFIED LOCAL MODEL COMMENTARY\]:\s*/, ''))}</span>
+        </div>
+      `;
+    }
     sourceLine = `
       <div class="chat-message-meta">
         <span class="chat-source-badge">
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" style="display:inline-block;vertical-align:-1px;margin-right:3px;">
             <path d="M2 6l3 3 5-5"/>
           </svg>
-          Grounded in 5 case evidence sources
+          ${answer_composed_by ? 'Deterministic Evidence Composition' : 'Grounded in case evidence'}
         </span>
         <button class="chat-view-evidence-btn" type="button" onclick="scrollToEvidence()">View Evidence</button>
       </div>
@@ -2533,7 +2667,10 @@ function appendChatMessage({ role, content, source, ai_used, model }) {
   msgEl.className = `chat-message ${isOperator ? 'operator' : 'payvault'}`;
   msgEl.innerHTML = `
     <span class="chat-message-sender">${escapeHtml(senderLabel)}</span>
-    <div class="chat-bubble">${renderChatMarkdown(content)}</div>
+    <div class="chat-bubble">
+      ${renderChatMarkdown(content)}
+      ${commentarySection}
+    </div>
     ${sourceLine}
   `;
 
