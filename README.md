@@ -141,7 +141,7 @@ cp .env.example .env
 | Variable | Default (Local / Docker) | Description |
 | :--- | :--- | :--- |
 | `PORT` | `3000` | Port for the Payvault web server and frontend. |
-| `DATABASE_URL` | `postgresql://payvault:payvault_dev_secret@localhost:5432/payvault` | PostgreSQL connection string. (Inside Docker, host is `postgres`). |
+| `DATABASE_URL` | `postgresql://payvault:<your-local-password>@localhost:5432/payvault` | PostgreSQL connection string. (Inside Docker, host is `postgres`). |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection string. (Inside Docker, host is `redis`). |
 | `CHAT_CONTEXT_TTL_SECONDS` | `3600` | Expiration time (seconds) for conversational session context in Redis. |
 | `PAYPAL_CLIENT_ID` | *(your sandbox client id)* | PayPal Developer Sandbox App Client ID. |
@@ -149,7 +149,7 @@ cp .env.example .env
 | `PAYPAL_WEBHOOK_ID` | *(optional webhook id)* | PayPal Sandbox Webhook ID for signature verification. |
 | `POSTGRES_DB` | `payvault` | PostgreSQL database name (used by Docker Compose). |
 | `POSTGRES_USER` | `payvault` | PostgreSQL user (used by Docker Compose). |
-| `POSTGRES_PASSWORD` | `payvault_dev_secret` | PostgreSQL development password. |
+| `POSTGRES_PASSWORD` | *(required in `.env`; no default committed)* | PostgreSQL development password. |
 
 > **Note on Security**: Never commit your actual `PAYPAL_CLIENT_SECRET` or production database credentials to version control. The repository ignores `.env` by default.
 
