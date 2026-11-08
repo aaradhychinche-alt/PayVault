@@ -12,7 +12,7 @@ Get Payvault up and running in under two minutes with Docker:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/aaradhychinche/PayVault.git
+git clone https://github.com/aaradhychinche-alt/PayVault.git
 cd PayVault
 
 # 2. Copy the environment template
