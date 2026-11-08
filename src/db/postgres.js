@@ -28,7 +28,15 @@ let _isAvailable = false;
 let _checked = false;
 
 function getDatabaseUrl() {
-  return process.env.DATABASE_URL || 'postgresql://payvault:payvault_dev_secret@localhost:5432/payvault';
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    throw new Error(
+      'DATABASE_URL is not set. Copy .env.example to .env and set DATABASE_URL ' +
+      '(choose your own local password) to enable PostgreSQL persistence. ' +
+      'Without it Payvault runs in in-memory DEVELOPMENT FALLBACK mode.'
+    );
+  }
+  return url;
 }
 
 function initPool() {
@@ -67,7 +75,7 @@ async function checkConnection() {
   } catch (err) {
     _isAvailable = false;
     _checked = true;
-    console.log('[Payvault DB] PostgreSQL unavailable or unconfigured. Operating in DEVELOPMENT FALLBACK mode.');
+    console.log('[Payvault DB] PostgreSQL unavailable or unconfigured: ' + err.message + ' Operating in DEVELOPMENT FALLBACK mode.');
   }
 
   return _isAvailable;
